@@ -82,6 +82,27 @@ class StorageService:
         )
         return {"method": "PUT", "url": url, "headers": {"Content-Type": content_type}, "expires_in_seconds": 3600}
 
+    def upload_fileobj(self, object_key: str, file_obj, content_type: str, storage_config: dict | None = None) -> None:
+        full_key = self._full_key(object_key, storage_config)
+        file_obj.seek(0)
+        if self._is_local(storage_config):
+            path = self._local_path(full_key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("wb") as target:
+                shutil.copyfileobj(file_obj, target, length=1024 * 1024)
+            file_obj.seek(0)
+            return
+        config = self._effective_config(storage_config)
+        self._validate_remote_config(config)
+        client = self._s3_client(config)
+        client.upload_fileobj(
+            file_obj,
+            config["bucket_name"],
+            full_key,
+            ExtraArgs={"ContentType": content_type or "application/octet-stream"},
+        )
+        file_obj.seek(0)
+
     def create_download_url(self, object_key: str, expires_in: int = 3600, storage_config: dict | None = None):
         full_key = self._full_key(object_key, storage_config)
         if self._is_local(storage_config):

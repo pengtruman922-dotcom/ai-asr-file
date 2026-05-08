@@ -1,7 +1,7 @@
 from pathlib import Path
 import time
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -263,6 +263,70 @@ async def upload_complete(recording_id: str, payload: dict, db: Session = Depend
     db.commit()
     enqueue_job(job.id)
     return ok({"recording_id": recording.id, "status": "queued", "job_id": job.id})
+
+
+@app.post("/api/projects/{project_id}/recordings/upload")
+def upload_recording_proxy(
+    project_id: str,
+    file: UploadFile = File(...),
+    duration_seconds: int = Form(0),
+    template_type: str = Form("customer_interview"),
+    db: Session = Depends(get_db),
+):
+    project = db.get(Project, project_id)
+    if not project:
+        return fail("PROJECT_NOT_FOUND", "项目不存在", status_code=404)
+
+    file_name = file.filename or "recording"
+    extension = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    if extension not in ALLOWED_EXTENSIONS:
+        return fail("UNSUPPORTED_FILE_TYPE", "文件格式不支持")
+
+    file.file.seek(0, 2)
+    size = file.file.tell()
+    file.file.seek(0)
+
+    basic_config = get_basic_config(db)
+    max_size_mb = basic_config.get("max_upload_size_mb", settings.max_upload_size_mb)
+    if size > max_size_mb * 1024 * 1024:
+        return fail("FILE_TOO_LARGE", f"文件超过 {max_size_mb}M")
+    max_duration_hours = basic_config.get("max_recording_duration_hours", settings.max_recording_duration_hours)
+    if duration_seconds and duration_seconds > max_duration_hours * 3600:
+        return fail("FILE_TOO_LONG", f"文件时长超过 {max_duration_hours} 小时")
+
+    recording_id = new_id("rec")
+    storage_config = resolve_storage_config(db)
+    object_key = f"projects/{project_id}/recordings/{recording_id}/original.{extension}"
+    try:
+        storage.upload_fileobj(object_key, file.file, file.content_type or "application/octet-stream", storage_config)
+    except RuntimeError as exc:
+        return fail("STORAGE_CONFIG_MISSING", str(exc))
+    except Exception as exc:
+        return fail("STORAGE_UPLOAD_FAILED", f"文件写入 Bucket 失败：{exc}")
+
+    recording = Recording(
+        id=recording_id,
+        project_id=project_id,
+        file_name=file_name,
+        object_key=object_key,
+        storage_config_id="default",
+        storage_provider=storage_config.get("provider", "railway_bucket"),
+        storage_bucket_name=storage_config.get("bucket_name", ""),
+        storage_endpoint=storage_config.get("endpoint", ""),
+        storage_region=storage_config.get("region", "auto"),
+        storage_path_prefix=storage_config.get("path_prefix", ""),
+        mime_type=file.content_type or "application/octet-stream",
+        extension=extension,
+        file_size_bytes=size,
+        duration_seconds=duration_seconds,
+        status="queued",
+        template_type=template_type or "customer_interview",
+    )
+    db.add(recording)
+    job = create_job(db, recording.project_id, recording.id, "asr_transcription")
+    db.commit()
+    enqueue_job(job.id)
+    return ok({"recording_id": recording.id, "object_key": object_key, "status": "queued", "job_id": job.id})
 
 
 @app.get("/api/projects/{project_id}/recordings")

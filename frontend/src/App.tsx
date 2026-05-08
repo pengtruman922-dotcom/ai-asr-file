@@ -474,6 +474,7 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
 function UploadModal({ open, projectId, onClose, onDone }: { open: boolean; projectId: string; onClose: () => void; onDone: () => void }) {
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [progress, setProgress] = useState(0);
+  const [uploading, setUploading] = useState(false);
   const [limits, setLimits] = useState<AppSettings['basic']>({ max_upload_size_mb: 500, max_recording_duration_hours: 3 });
 
   useEffect(() => {
@@ -485,29 +486,56 @@ function UploadModal({ open, projectId, onClose, onDone }: { open: boolean; proj
     const file = files[0]?.originFileObj as File | undefined;
     if (!file) return message.warning('请选择文件');
     if (file.size > limits.max_upload_size_mb * 1024 * 1024) return message.error(`文件超过 ${limits.max_upload_size_mb}MB`);
-    const duration = await readAudioDuration(file);
-    if (duration && duration > limits.max_recording_duration_hours * 3600) return message.error(`文件时长超过 ${limits.max_recording_duration_hours} 小时`);
-    const ext = file.name.split('.').pop()?.toLowerCase() || '';
-    setProgress(0);
-    const session = await api<any>(`/api/projects/${projectId}/recordings/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: duration ? Math.round(duration) : 0, template_type: 'customer_interview' }) });
-    await putWithProgress(session.upload.url, file, session.upload.headers || {}, setProgress);
-    await api(`/api/recordings/${session.recording_id}/upload-complete`, { method: 'POST', body: JSON.stringify({ object_key: session.object_key, file_size_bytes: file.size }) });
-    message.success('上传完成，已进入处理队列');
-    setFiles([]); setProgress(0); onDone();
+    setUploading(true);
+    try {
+      const duration = await readAudioDuration(file);
+      if (duration && duration > limits.max_recording_duration_hours * 3600) {
+        message.error(`文件时长超过 ${limits.max_recording_duration_hours} 小时`);
+        return;
+      }
+      const form = new FormData();
+      form.append('file', file);
+      form.append('duration_seconds', String(duration ? Math.round(duration) : 0));
+      form.append('template_type', 'customer_interview');
+      setProgress(0);
+      await postFormWithProgress(`/api/projects/${projectId}/recordings/upload`, form, setProgress);
+      message.success('上传完成，已进入处理队列');
+      setFiles([]); setProgress(0); onDone();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '上传失败');
+    } finally {
+      setUploading(false);
+    }
   };
-  return <Modal title="上传录音" open={open} onCancel={onClose} onOk={upload} okText="开始上传"><Upload.Dragger beforeUpload={() => false} maxCount={1} fileList={files} onChange={(info) => setFiles(info.fileList)}><p className="ant-upload-drag-icon"><InboxOutlined /></p><p>拖拽文件到此处，或点击选择文件</p><p>支持 mp3 / wav / m4a / aac / flac / ogg / wma，单文件最大 {limits.max_upload_size_mb}MB，时长上限 {limits.max_recording_duration_hours} 小时</p></Upload.Dragger>{progress > 0 && <Progress percent={progress} />}</Modal>;
+  return <Modal title="上传录音" open={open} onCancel={onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}><Upload.Dragger beforeUpload={() => false} maxCount={1} fileList={files} onChange={(info) => setFiles(info.fileList)} disabled={uploading}><p className="ant-upload-drag-icon"><InboxOutlined /></p><p>拖拽文件到此处，或点击选择文件</p><p>支持 mp3 / wav / m4a / aac / flac / ogg / wma，单文件最大 {limits.max_upload_size_mb}MB，时长上限 {limits.max_recording_duration_hours} 小时</p></Upload.Dragger>{progress > 0 && <Progress percent={progress} />}</Modal>;
 }
 
-function putWithProgress(url: string, file: File, headers: Record<string, string>, onProgress: (value: number) => void) {
-  return new Promise<void>((resolve, reject) => {
+function postFormWithProgress(url: string, body: FormData, onProgress: (value: number) => void) {
+  return new Promise<any>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('PUT', url);
-    Object.entries(headers).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+    xhr.open('POST', url);
+    const token = getToken();
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
     xhr.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100)); };
-    xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error('上传失败'));
+    xhr.onload = () => {
+      const data = safeParseJson(xhr.responseText);
+      if (xhr.status >= 200 && xhr.status < 300 && data?.success !== false) {
+        resolve(data?.data ?? {});
+        return;
+      }
+      reject(new Error(data?.error?.message || data?.detail || `上传失败：HTTP ${xhr.status}`));
+    };
     xhr.onerror = () => reject(new Error('上传失败'));
-    xhr.send(file);
+    xhr.send(body);
   });
+}
+
+function safeParseJson(text: string) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 
@@ -515,14 +543,23 @@ function readAudioDuration(file: File) {
   return new Promise<number | null>((resolve) => {
     const audio = document.createElement('audio');
     const url = URL.createObjectURL(file);
-    const cleanup = () => { URL.revokeObjectURL(url); audio.removeAttribute('src'); audio.load(); };
+    let settled = false;
+    const timer = window.setTimeout(() => finish(null), 5000);
+    const finish = (value: number | null) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      URL.revokeObjectURL(url);
+      audio.removeAttribute('src');
+      audio.load();
+      resolve(value);
+    };
     audio.preload = 'metadata';
     audio.onloadedmetadata = () => {
       const duration = Number.isFinite(audio.duration) ? audio.duration : null;
-      cleanup();
-      resolve(duration);
+      finish(duration);
     };
-    audio.onerror = () => { cleanup(); resolve(null); };
+    audio.onerror = () => finish(null);
     audio.src = url;
   });
 }
