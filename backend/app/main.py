@@ -243,8 +243,13 @@ async def create_upload_session(project_id: str, payload: dict, db: Session = De
         template_type="customer_interview",
     )
     db.add(recording)
+    try:
+        upload = storage.create_upload_url(object_key, recording.mime_type, storage_config)
+    except RuntimeError as exc:
+        db.rollback()
+        return fail("STORAGE_CONFIG_MISSING", str(exc))
     db.commit()
-    return ok({"recording_id": recording_id, "object_key": object_key, "upload": storage.create_upload_url(object_key, recording.mime_type, storage_config)})
+    return ok({"recording_id": recording_id, "object_key": object_key, "upload": upload})
 
 
 @app.post("/api/recordings/{recording_id}/upload-complete")

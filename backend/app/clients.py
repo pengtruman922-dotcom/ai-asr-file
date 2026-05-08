@@ -18,8 +18,10 @@ class ASRClient:
     def transcribe(self, audio_url: str, file_name: str, on_task_id: Callable[[str], None] | None = None) -> list[dict]:
         config = get_ai_config("asr")
         api_key = config.get("api_key", "")
-        if self.settings.asr_mock_enabled or not api_key:
+        if self._use_local_mock(self.settings.asr_mock_enabled, api_key):
             return self._mock_segments(file_name)
+        if not api_key:
+            raise RuntimeError("ASR_API_KEY_MISSING: 请先在系统设置中配置 ASR API Key，或在 Railway 变量中配置 ASR_API_KEY。")
 
         submit_url = (config.get("url") or self.settings.asr_api_url).strip().rstrip("/")
         model = (config.get("model") or self.settings.asr_model).strip()
@@ -245,6 +247,9 @@ class ASRClient:
     def _compact_json(self, payload: Any) -> str:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))[:1200]
 
+    def _use_local_mock(self, mock_enabled: bool, api_key: str) -> bool:
+        return self.settings.app_env == "local" and mock_enabled and not api_key
+
     def _mock_segments(self, file_name: str) -> list[dict]:
         topic = file_name.rsplit(".", 1)[0]
         return [
@@ -293,7 +298,7 @@ class LLMClient:
     def clean_segments(self, raw_segments: list[dict]) -> list[dict]:
         config = get_ai_config("clean")
         api_key = config.get("api_key", "")
-        if self.settings.llm_mock_enabled or not api_key:
+        if self._use_local_mock(self.settings.llm_mock_enabled, api_key):
             return [
                 {
                     "raw_segment_id": item["id"],
@@ -304,6 +309,8 @@ class LLMClient:
                 }
                 for item in raw_segments
             ]
+        if not api_key:
+            raise RuntimeError("LLM_API_KEY_MISSING: 请先在系统设置中配置清洁稿模型 API Key。")
         content = self._chat_json(
             config.get("url", self.settings.llm_clean_base_url),
             api_key,
@@ -353,7 +360,7 @@ class LLMClient:
     def summarize(self, clean_segments: list[dict], template_type: str) -> dict:
         config = get_ai_config("summary")
         api_key = config.get("api_key", "")
-        if self.settings.llm_mock_enabled or not api_key:
+        if self._use_local_mock(self.settings.llm_mock_enabled, api_key):
             quotes = [
                 {
                     "quote": item["text"],
@@ -395,6 +402,8 @@ class LLMClient:
 {quote_lines}
 """
             return {"format": "markdown", "markdown": markdown.strip(), "report_quotes": quotes}
+        if not api_key:
+            raise RuntimeError("LLM_API_KEY_MISSING: 请先在系统设置中配置纪要模型 API Key。")
 
         prompt = json.dumps({"template_type": template_type, "segments": clean_segments}, ensure_ascii=False)
         content = self._chat_plain(
@@ -409,7 +418,7 @@ class LLMClient:
     def answer(self, question: str, materials: list[dict], history: list[dict] | None = None) -> dict:
         config = get_ai_config("qa")
         api_key = config.get("api_key", "")
-        if self.settings.llm_mock_enabled or not api_key:
+        if self._use_local_mock(self.settings.llm_mock_enabled, api_key):
             sources = []
             for material in materials:
                 for seg in material["segments"]:
@@ -435,6 +444,8 @@ class LLMClient:
                 "sources": sources,
                 "uncertainties": [],
             }
+        if not api_key:
+            raise RuntimeError("LLM_API_KEY_MISSING: 请先在系统设置中配置问答模型 API Key。")
         prompt = json.dumps(
             {
                 "question": question,
@@ -509,6 +520,9 @@ class LLMClient:
         if endpoint.endswith("/chat/completions"):
             return endpoint
         return endpoint + "/chat/completions"
+
+    def _use_local_mock(self, mock_enabled: bool, api_key: str) -> bool:
+        return self.settings.app_env == "local" and mock_enabled and not api_key
 
     def _loads_json(self, content: str) -> Any:
         content = content.strip()

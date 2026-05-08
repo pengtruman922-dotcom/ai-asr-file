@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    app_env: str = "local"
+    app_env: str = "production"
     app_base_url: str = "http://localhost:8000"
     session_secret: str = "change-me"
     admin_username: str = "admin"
@@ -17,15 +17,21 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     queue_sync: bool = True
 
-    storage_provider: str = "local"
-    storage_mock_enabled: bool = True
+    storage_provider: str = "railway_bucket"
+    storage_mock_enabled: bool = False
     local_storage_dir: str = "./local_storage"
+    bucket: str = ""
+    endpoint: str = ""
+    access_key_id: str = ""
+    secret_access_key: str = ""
+    region: str = ""
     railway_bucket_endpoint: str = ""
     railway_bucket_name: str = ""
     railway_bucket_access_key_id: str = ""
     railway_bucket_secret_access_key: str = ""
     railway_bucket_region: str = "auto"
     storage_path_prefix: str = ""
+    storage_addressing_style: str = "virtual"
 
     asr_mock_enabled: bool = True
     asr_api_url: str = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"

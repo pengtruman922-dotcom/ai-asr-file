@@ -23,6 +23,7 @@ def _positive_int(value: Any, fallback: int, minimum: int = 1) -> int:
 
 def default_app_settings() -> dict:
     env = get_settings()
+    env_storage = _env_bucket_config()
     return {
         "basic": {
             "max_upload_size_mb": env.max_upload_size_mb,
@@ -35,13 +36,14 @@ def default_app_settings() -> dict:
             "qa": {"model": env.llm_qa_model, "url": env.llm_qa_base_url, "api_key": env.llm_qa_api_key},
         },
         "storage": {
-            "provider": env.storage_provider,
-            "bucket_name": env.railway_bucket_name,
-            "endpoint": env.railway_bucket_endpoint,
-            "region": env.railway_bucket_region,
-            "access_key_id": env.railway_bucket_access_key_id,
-            "secret_access_key": env.railway_bucket_secret_access_key,
+            "provider": env_storage.get("provider") or env.storage_provider,
+            "bucket_name": env_storage.get("bucket_name", ""),
+            "endpoint": env_storage.get("endpoint", ""),
+            "region": env_storage.get("region", "auto"),
+            "access_key_id": env_storage.get("access_key_id", ""),
+            "secret_access_key": env_storage.get("secret_access_key", ""),
             "path_prefix": env.storage_path_prefix,
+            "addressing_style": env.storage_addressing_style,
         },
     }
 
@@ -78,7 +80,7 @@ def _normalize(payload: dict | None, base: dict) -> dict:
     current_storage = merged["storage"]
     provider = str(storage.get("provider") or current_storage.get("provider") or "local").strip()
     current_storage["provider"] = provider if provider in STORAGE_PROVIDERS else "local"
-    for field in ("bucket_name", "endpoint", "region", "path_prefix"):
+    for field in ("bucket_name", "endpoint", "region", "path_prefix", "addressing_style"):
         if field in storage:
             current_storage[field] = str(storage.get(field) or "").strip()
     access_key = storage.get("access_key_id", storage.get("access_key"))
@@ -95,6 +97,41 @@ def _normalize(payload: dict | None, base: dict) -> dict:
     return merged
 
 
+def _env_bucket_config() -> dict:
+    env = get_settings()
+    bucket_name = env.bucket or env.railway_bucket_name
+    endpoint = env.endpoint or env.railway_bucket_endpoint
+    access_key_id = env.access_key_id or env.railway_bucket_access_key_id
+    secret_access_key = env.secret_access_key or env.railway_bucket_secret_access_key
+    region = env.region or env.railway_bucket_region or "auto"
+    return {
+        "provider": "railway_bucket" if bucket_name or endpoint or access_key_id or secret_access_key else env.storage_provider,
+        "bucket_name": bucket_name,
+        "endpoint": endpoint,
+        "region": region,
+        "access_key_id": access_key_id,
+        "secret_access_key": secret_access_key,
+        "addressing_style": env.storage_addressing_style,
+    }
+
+
+def _apply_runtime_overrides(settings: dict) -> dict:
+    env = get_settings()
+    storage = settings.setdefault("storage", {})
+    env_storage = _env_bucket_config()
+
+    # Railway-provided bucket variables are the source of truth in production.
+    # This prevents an earlier saved "local" setting from silently keeping files off the Bucket.
+    if env.app_env != "local":
+        storage["provider"] = "railway_bucket"
+        for field in ("bucket_name", "endpoint", "region", "access_key_id", "secret_access_key", "addressing_style"):
+            if env_storage.get(field):
+                storage[field] = env_storage[field]
+        storage.setdefault("addressing_style", env.storage_addressing_style)
+
+    return settings
+
+
 def get_app_settings(session: Session | None = None) -> dict:
     if session is None:
         with session_scope() as scoped_session:
@@ -103,8 +140,8 @@ def get_app_settings(session: Session | None = None) -> dict:
     base = default_app_settings()
     row = session.get(SystemSetting, SETTINGS_KEY)
     if not row or not isinstance(row.value, dict):
-        return base
-    return _normalize(row.value, base)
+        return _apply_runtime_overrides(base)
+    return _apply_runtime_overrides(_normalize(row.value, base))
 
 
 def save_app_settings(session: Session, payload: dict) -> dict:

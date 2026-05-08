@@ -69,6 +69,7 @@ Create two Railway services from the same repo/root:
 - Worker service: use `railway.worker.toml`, command `python -m app.worker`.
 - If setting commands manually in Railway, do not use `cd backend && ...` with the Docker image. The Docker image already uses `/app/backend` as `WORKDIR`.
 - Keep the root `Dockerfile` enabled unless you intentionally switch to Railway's Python builder. The Dockerfile is responsible for building the frontend before FastAPI serves it.
+- Production does not silently fall back to mock ASR/LLM or local storage. If credentials are missing, the app returns a clear configuration error.
 
 Required production variables:
 
@@ -99,6 +100,8 @@ LLM_SUMMARY_API_KEY=<Aliyun key>
 LLM_QA_API_KEY=<Aliyun key>
 LLM_TIMEOUT_SECONDS=300
 ```
+
+Railway Storage Buckets may expose variables named `BUCKET`, `ENDPOINT`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, and `REGION`; the app auto-detects these and prefers `BUCKET` over the display-only Railway bucket service name.
 
 After deployment, open System Settings in the app and run the AI connection tests and storage connection test before uploading real recordings.
 
