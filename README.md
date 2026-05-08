@@ -46,6 +46,18 @@ See `backend/.env.example` for environment variables.
 
 Product and API notes are tracked in `prd.md` and `api-spec.md`.
 
+Repository layout:
+
+```text
+/
+├── requirements.txt
+├── Dockerfile
+├── backend/
+│   └── app/main.py
+├── frontend/
+└── railway.web.toml / railway.worker.toml
+```
+
 
 ## Railway Deploy Checklist
 
@@ -53,8 +65,10 @@ The repo now includes a root `Dockerfile` that builds the Vite frontend and copi
 
 Create two Railway services from the same repo/root:
 
-- Web service: use `railway.web.toml`, command `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+- Web service: use `railway.web.toml`, command `sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}'`.
 - Worker service: use `railway.worker.toml`, command `python -m app.worker`.
+- If setting commands manually in Railway, do not use `cd backend && ...` with the Docker image. The Docker image already uses `/app/backend` as `WORKDIR`.
+- Keep the root `Dockerfile` enabled unless you intentionally switch to Railway's Python builder. The Dockerfile is responsible for building the frontend before FastAPI serves it.
 
 Required production variables:
 
