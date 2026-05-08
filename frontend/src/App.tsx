@@ -475,6 +475,7 @@ function UploadModal({ open, projectId, onClose, onDone }: { open: boolean; proj
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const [limits, setLimits] = useState<AppSettings['basic']>({ max_upload_size_mb: 500, max_recording_duration_hours: 3 });
 
   useEffect(() => {
@@ -487,6 +488,7 @@ function UploadModal({ open, projectId, onClose, onDone }: { open: boolean; proj
     if (!file) return message.warning('请选择文件');
     if (file.size > limits.max_upload_size_mb * 1024 * 1024) return message.error(`文件超过 ${limits.max_upload_size_mb}MB`);
     setUploading(true);
+    setUploadError('');
     try {
       const duration = await readAudioDuration(file);
       if (duration && duration > limits.max_recording_duration_hours * 3600) {
@@ -502,12 +504,14 @@ function UploadModal({ open, projectId, onClose, onDone }: { open: boolean; proj
       message.success('上传完成，已进入处理队列');
       setFiles([]); setProgress(0); onDone();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '上传失败');
+      const errorMessage = error instanceof Error ? error.message : '上传失败';
+      setUploadError(errorMessage);
+      message.error(errorMessage);
     } finally {
       setUploading(false);
     }
   };
-  return <Modal title="上传录音" open={open} onCancel={onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}><Upload.Dragger beforeUpload={() => false} maxCount={1} fileList={files} onChange={(info) => setFiles(info.fileList)} disabled={uploading}><p className="ant-upload-drag-icon"><InboxOutlined /></p><p>拖拽文件到此处，或点击选择文件</p><p>支持 mp3 / wav / m4a / aac / flac / ogg / wma，单文件最大 {limits.max_upload_size_mb}MB，时长上限 {limits.max_recording_duration_hours} 小时</p></Upload.Dragger>{progress > 0 && <Progress percent={progress} />}</Modal>;
+  return <Modal title="上传录音" open={open} onCancel={uploading ? undefined : onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}><Upload.Dragger beforeUpload={() => false} maxCount={1} fileList={files} onChange={(info) => { setFiles(info.fileList); setUploadError(''); }} disabled={uploading}><p className="ant-upload-drag-icon"><InboxOutlined /></p><p>拖拽文件到此处，或点击选择文件</p><p>支持 mp3 / wav / m4a / aac / flac / ogg / wma，单文件最大 {limits.max_upload_size_mb}MB，时长上限 {limits.max_recording_duration_hours} 小时</p></Upload.Dragger>{progress > 0 && <Progress percent={progress} />}{uploadError && <Text type="danger">{uploadError}</Text>}</Modal>;
 }
 
 function postFormWithProgress(url: string, body: FormData, onProgress: (value: number) => void) {
@@ -526,6 +530,8 @@ function postFormWithProgress(url: string, body: FormData, onProgress: (value: n
       reject(new Error(data?.error?.message || data?.detail || `上传失败：HTTP ${xhr.status}`));
     };
     xhr.onerror = () => reject(new Error('上传失败'));
+    xhr.ontimeout = () => reject(new Error('上传超时，请稍后重试或换一个更小的文件测试'));
+    xhr.timeout = 10 * 60 * 1000;
     xhr.send(body);
   });
 }
