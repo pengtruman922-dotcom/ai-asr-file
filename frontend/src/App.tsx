@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import { Button, Card, Checkbox, Dropdown, Form, Input, InputNumber, Layout, List, Modal, Progress, Select, Space, Table, Tabs, Tag, Typography, Upload, message } from 'antd';
-import { DeleteOutlined, DownloadOutlined, DownOutlined, InboxOutlined, MoreOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, DownloadOutlined, DownOutlined, EditOutlined, InboxOutlined, MoreOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
 import type { MenuProps, UploadFile } from 'antd';
 import { api, clearToken, formatDuration, formatMs, getToken, setToken } from './api';
 import type { AiTestResult, AppSettings, Job, Project, QAMessage, QAThread, Recording, StorageTestResult, TranscriptSegment } from './types';
@@ -186,6 +186,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<QAMessage[]>([]);
   const [qaQuestion, setQaQuestion] = useState('');
+  const [qaSubmitting, setQaSubmitting] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
   const [columnWidths, setColumnWidths] = useState<ProjectColumnWidths>(loadProjectColumnWidths);
@@ -231,6 +232,17 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   useEffect(() => { void loadSelected(); }, [loadSelected]);
   useEffect(() => { void loadThreads(); }, [loadThreads]);
   useEffect(() => { void loadThread(); }, [loadThread]);
+  useEffect(() => {
+    const hasRunningRecording = recordings.some((item) => !['completed', 'failed', 'created'].includes(item.status));
+    const hasRunningMessage = messages.some((item) => ['queued', 'running'].includes(item.status));
+    if (!hasRunningRecording && !hasRunningMessage) return;
+    const timer = window.setInterval(() => {
+      void loadProject();
+      void loadSelected();
+      void loadThread();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [recordings, messages, loadProject, loadSelected, loadThread]);
 
   useEffect(() => {
     const normalizeToContainer = () => {
@@ -301,8 +313,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     void audioRef.current.play();
   };
 
-  const saveSegment = async (seg: TranscriptSegment) => {
-    await api(`/api/transcript-segments/${seg.segment_id}`, { method: 'PATCH', body: JSON.stringify({ speaker: seg.speaker, text: seg.text }) });
+  const saveSegment = async (seg: TranscriptSegment, options?: { replaceSameSpeaker?: boolean }) => {
+    await api(`/api/transcript-segments/${seg.segment_id}`, { method: 'PATCH', body: JSON.stringify({ speaker: seg.speaker, text: seg.text, replace_same_speaker: !!options?.replaceSameSpeaker }) });
     message.success('已保存，纪要已标记为过期');
     void loadSelected();
   };
@@ -322,18 +334,34 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   };
 
   const ask = async () => {
-    if (!qaQuestion.trim()) return message.warning('请输入问题');
+    const question = qaQuestion.trim();
+    if (!question) return message.warning('请输入问题');
     if (!checkedIds.length) return message.warning('请先勾选录音');
+    if (qaSubmitting) return;
     let threadId = currentThreadId;
     if (!threadId) {
       const thread = await api<QAThread>(`/api/projects/${projectId}/qa-threads`, { method: 'POST', body: JSON.stringify({}) });
       threadId = thread.thread_id;
       setCurrentThreadId(threadId);
     }
-    await api(`/api/qa-threads/${threadId}/messages`, { method: 'POST', body: JSON.stringify({ recording_ids: checkedIds, question: qaQuestion }) });
+    const now = new Date().toISOString();
     setQaQuestion('');
-    message.success('已提交问题');
-    setTimeout(() => { void loadThreads(); void loadThread(); }, 800);
+    setMessages((prev) => [
+      ...prev,
+      { message_id: `tmp_user_${Date.now()}`, thread_id: threadId!, role: 'user', content: question, selected_recording_ids: checkedIds, sources: [], status: 'ready', created_at: now },
+      { message_id: `tmp_ai_${Date.now()}`, thread_id: threadId!, role: 'assistant', content: '', selected_recording_ids: checkedIds, sources: [], status: 'queued', created_at: now },
+    ]);
+    setQaSubmitting(true);
+    try {
+      await api(`/api/qa-threads/${threadId}/messages`, { method: 'POST', body: JSON.stringify({ recording_ids: checkedIds, question }) });
+      void loadThreads();
+      void loadThread();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '问题提交失败');
+      void loadThread();
+    } finally {
+      setQaSubmitting(false);
+    }
   };
 
   const deleteRecording = async (id: string) => {
@@ -384,7 +412,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
         <aside className="right-panel panel-scroll">
           <Tabs defaultActiveKey="summary" items={[
             { key: 'summary', label: '纪要', children: <SummaryView summary={summary} stale={selectedRecording?.summary_stale} onExport={() => exportMd('summary')} /> },
-            { key: 'qa', label: '问答', children: <QAView checked={checkedIds} recordings={recordings} threads={threads} currentThreadId={currentThreadId} setCurrentThreadId={setCurrentThreadId} messages={messages} question={qaQuestion} setQuestion={setQaQuestion} onAsk={ask} onNewThread={createThread} /> }
+            { key: 'qa', label: '问答', children: <QAView checked={checkedIds} recordings={recordings} threads={threads} currentThreadId={currentThreadId} setCurrentThreadId={setCurrentThreadId} messages={messages} question={qaQuestion} setQuestion={setQaQuestion} onAsk={ask} onNewThread={createThread} submitting={qaSubmitting} /> }
           ]} />
         </aside>
       </div>
@@ -406,15 +434,39 @@ function ColumnResizeHandle({ side, active, onPointerDown, onDoubleClick }: { si
   />;
 }
 
-function SegmentEditor({ segment, showRaw, onJump, onSave }: { segment: TranscriptSegment; showRaw: boolean; onJump: (ms: number) => void; onSave: (seg: TranscriptSegment) => void }) {
-  const [editing, setEditing] = useState(false);
+function SegmentEditor({ segment, showRaw, onJump, onSave }: { segment: TranscriptSegment; showRaw: boolean; onJump: (ms: number) => void; onSave: (seg: TranscriptSegment, options?: { replaceSameSpeaker?: boolean }) => void }) {
+  const [editingSpeaker, setEditingSpeaker] = useState(false);
+  const [editingText, setEditingText] = useState(false);
   const [draft, setDraft] = useState(segment);
   useEffect(() => setDraft(segment), [segment]);
+  const saveSpeaker = () => {
+    if (draft.speaker === segment.speaker) {
+      setEditingSpeaker(false);
+      return;
+    }
+    Modal.confirm({
+      title: '是否同步替换相同发言人？',
+      content: `将“${segment.speaker}”改为“${draft.speaker}”。请选择只修改本段，或替换本录音中所有相同发言人。`,
+      okText: '全部替换',
+      cancelText: '仅修改本段',
+      onOk: () => { setEditingSpeaker(false); onSave({ ...segment, speaker: draft.speaker }, { replaceSameSpeaker: true }); },
+      onCancel: () => { setEditingSpeaker(false); onSave({ ...segment, speaker: draft.speaker }, { replaceSameSpeaker: false }); },
+    });
+  };
+  const saveText = () => {
+    setEditingText(false);
+    onSave({ ...segment, text: draft.text });
+  };
   return <Card size="small" className="segment-card">
     <Space align="start">
       <Button type="link" onClick={() => onJump(segment.start_time_ms)}>{formatMs(segment.start_time_ms)}</Button>
       <div className="segment-body">
-        {editing ? <Space direction="vertical" style={{ width: '100%' }}><Input value={draft.speaker} onChange={(e) => setDraft({ ...draft, speaker: e.target.value })} /><Input.TextArea rows={3} value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} /><Space><Button type="primary" onClick={() => { setEditing(false); onSave(draft); }}>保存</Button><Button onClick={() => setEditing(false)}>取消</Button></Space></Space> : <><Text strong>{segment.speaker}：</Text><Text>{segment.text}</Text><Button size="small" type="link" onClick={() => setEditing(true)}>编辑</Button></>}
+        <div className="segment-speaker-line">
+          {editingSpeaker ? <Space.Compact><Input size="small" value={draft.speaker} onChange={(e) => setDraft({ ...draft, speaker: e.target.value })} onPressEnter={saveSpeaker} /><Button size="small" type="primary" onClick={saveSpeaker}>保存</Button><Button size="small" onClick={() => { setDraft(segment); setEditingSpeaker(false); }}>取消</Button></Space.Compact> : <><Text strong>{segment.speaker}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditingSpeaker(true)} /></>}
+        </div>
+        <div className="segment-text-line">
+          {editingText ? <Space direction="vertical" style={{ width: '100%' }}><Input.TextArea rows={3} value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} /><Space><Button size="small" type="primary" onClick={saveText}>保存正文</Button><Button size="small" onClick={() => { setDraft(segment); setEditingText(false); }}>取消</Button></Space></Space> : <><Text>{segment.text}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditingText(true)} /></>}
+        </div>
         {showRaw && segment.raw_text && <Paragraph className="raw-text">{segment.raw_text}</Paragraph>}
       </div>
     </Space>
@@ -442,7 +494,7 @@ function MarkdownLite({ markdown }: { markdown: string }) {
   })}</div>;
 }
 
-function QAView({ checked, recordings, threads, currentThreadId, setCurrentThreadId, messages, question, setQuestion, onAsk, onNewThread }: { checked: string[]; recordings: Recording[]; threads: QAThread[]; currentThreadId: string | null; setCurrentThreadId: (id: string) => void; messages: QAMessage[]; question: string; setQuestion: (v: string) => void; onAsk: () => void; onNewThread: () => void }) {
+function QAView({ checked, recordings, threads, currentThreadId, setCurrentThreadId, messages, question, setQuestion, onAsk, onNewThread, submitting }: { checked: string[]; recordings: Recording[]; threads: QAThread[]; currentThreadId: string | null; setCurrentThreadId: (id: string) => void; messages: QAMessage[]; question: string; setQuestion: (v: string) => void; onAsk: () => void; onNewThread: () => void; submitting: boolean }) {
   const selectedNames = recordings.filter((r) => checked.includes(r.recording_id)).map((r) => r.file_name);
   return <Space direction="vertical" style={{ width: '100%' }}>
     <Space.Compact style={{ width: '100%' }}>
@@ -466,8 +518,8 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
         {(item.sources || []).slice(0, 3).map((s, idx) => <Paragraph type="secondary" key={idx}>来源：{s.file_name} {formatMs(s.start_time_ms)} - {s.quote}</Paragraph>)}
       </Card>)}
     </div>
-    <Input.TextArea rows={3} placeholder="输入问题" value={question} onChange={(e) => setQuestion(e.target.value)} />
-    <Button type="primary" onClick={onAsk}>发送</Button>
+    <Input.TextArea rows={3} placeholder="输入问题" value={question} onChange={(e) => setQuestion(e.target.value)} onPressEnter={(e) => { if (!e.shiftKey) { e.preventDefault(); onAsk(); } }} />
+    <Button type="primary" onClick={onAsk} loading={submitting}>发送</Button>
   </Space>;
 }
 

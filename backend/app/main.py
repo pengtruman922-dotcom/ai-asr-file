@@ -391,16 +391,28 @@ async def update_segment(segment_id: str, payload: dict, db: Session = Depends(g
     seg = db.get(CleanTranscriptSegment, segment_id)
     if not seg:
         return fail("SEGMENT_NOT_FOUND", "段落不存在", status_code=404)
-    seg.text = payload.get("text", seg.text)
-    seg.speaker = payload.get("speaker", seg.speaker)
-    seg.edited = True
+    old_speaker = seg.speaker
+    new_speaker = payload.get("speaker", seg.speaker)
+    updated_count = 1
+    if payload.get("replace_same_speaker") and new_speaker != old_speaker:
+        same_speaker_rows = db.query(CleanTranscriptSegment).filter_by(recording_id=seg.recording_id, speaker=old_speaker).all()
+        for row in same_speaker_rows:
+            row.speaker = new_speaker
+            row.edited = True
+        updated_count = len(same_speaker_rows)
+    else:
+        seg.speaker = new_speaker
+        seg.edited = True
+    if "text" in payload:
+        seg.text = payload.get("text") or ""
+        seg.edited = True
     recording = db.get(Recording, seg.recording_id)
     recording.summary_stale = True
     summary = db.query(SummaryArtifact).filter_by(recording_id=recording.id).first()
     if summary:
         summary.stale = True
     db.commit()
-    return ok({"segment_id": seg.id, "source": "clean_user_edited", "summary_stale": True})
+    return ok({"segment_id": seg.id, "source": "clean_user_edited", "summary_stale": True, "updated_count": updated_count})
 
 
 @app.get("/api/recordings/{recording_id}/summary")

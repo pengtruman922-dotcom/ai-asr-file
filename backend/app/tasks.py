@@ -23,7 +23,7 @@ from .utils import new_id
 
 def enqueue_job(job_id: str) -> None:
     settings = get_settings()
-    if settings.queue_sync:
+    if settings.app_env == "local" and settings.queue_sync:
         run_job(job_id)
         return
     from redis import Redis

@@ -45,6 +45,10 @@ class ASRClient:
                 "timestamp_alignment_enabled": True,
             },
         }
+        if self.settings.asr_diarization_enabled:
+            payload["parameters"]["diarization_enabled"] = True
+            if self.settings.asr_speaker_count > 0:
+                payload["parameters"]["speaker_count"] = self.settings.asr_speaker_count
         if model == "paraformer-v2":
             payload["parameters"]["language_hints"] = ["zh", "en"]
 
@@ -199,12 +203,12 @@ class ASRClient:
             if item.get(key):
                 return str(item[key])
         if item.get("speaker_id") is not None:
-            return f"说话人{int(item['speaker_id']) + 1}" if str(item["speaker_id"]).isdigit() else f"说话人{item['speaker_id']}"
+            return f"发言人{int(item['speaker_id']) + 1}" if str(item["speaker_id"]).isdigit() else f"发言人{item['speaker_id']}"
         if channel_id is not None:
-            return f"声道{channel_id}"
+            return "发言人1"
         if item.get("channel_id") is not None:
-            return f"声道{item['channel_id']}"
-        return "说话人"
+            return "发言人1"
+        return "发言人"
 
     def _confidence(self, item: dict) -> float | None:
         value = item.get("confidence", item.get("score"))

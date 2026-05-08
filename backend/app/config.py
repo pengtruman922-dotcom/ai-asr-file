@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./data/app.db"
     redis_url: str = "redis://localhost:6379/0"
-    queue_sync: bool = True
+    queue_sync: bool = False
 
     storage_provider: str = "railway_bucket"
     storage_mock_enabled: bool = False
@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     asr_model: str = "fun-asr"
     asr_poll_interval_seconds: int = 10
     asr_poll_timeout_seconds: int = 14400
+    asr_diarization_enabled: bool = True
+    asr_speaker_count: int = 2
 
     llm_mock_enabled: bool = True
     llm_clean_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"

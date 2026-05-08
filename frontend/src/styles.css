@@ -31,6 +31,8 @@ body { background: #f4f0e8; color: #1d2433; }
 .transcript-list { flex: 1; min-height: 0; padding: 12px 16px 100px; }
 .segment-card { margin-bottom: 10px; border-color: #eee3d5; }
 .segment-body { width: 100%; min-width: 0; }
+.segment-speaker-line { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+.segment-text-line { display: flex; align-items: flex-start; gap: 4px; line-height: 1.7; }
 .raw-text { margin-top: 8px; color: #888; background: #f3f3f3; padding: 8px; border-radius: 8px; }
 .player { height: 72px; display: flex; align-items: center; padding: 10px 16px; border-top: 1px solid #e8dfd1; background: #fffaf0; }
 .player audio { width: 100%; }
