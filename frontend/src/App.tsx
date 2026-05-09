@@ -464,8 +464,13 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
 
   const saveSegment = async (seg: TranscriptSegment, options?: { replaceSameSpeaker?: boolean }) => {
     await api(`/api/transcript-segments/${seg.segment_id}`, { method: 'PATCH', body: JSON.stringify({ speaker: seg.speaker, text: seg.text, replace_same_speaker: !!options?.replaceSameSpeaker }) });
+    if (selectedId) {
+      setRecordings((prev) => prev.map((item) => item.recording_id === selectedId ? { ...item, summary_stale: true } : item));
+    }
+    setSummary((prev: any) => prev ? { ...prev, stale: true } : prev);
     message.success('已保存，纪要已标记为过期');
     void loadSelected();
+    void loadProject();
   };
 
   const regenerateSummary = async () => {
@@ -568,7 +573,11 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
 
   const exportMd = async (type: 'summary' | 'transcript') => {
     if (!selectedId) return;
-    const data = await api<{ download_url: string }>(`/api/recordings/${selectedId}/exports`, { method: 'POST', body: JSON.stringify({ export_type: type, format: 'markdown' }) });
+    const data = await api<{ download_url: string; filename?: string; content?: string }>(`/api/recordings/${selectedId}/exports`, { method: 'POST', body: JSON.stringify({ export_type: type, format: 'markdown' }) });
+    if (data.content !== undefined) {
+      downloadTextFile(data.content, data.filename || `${type}.md`);
+      return;
+    }
     window.open(data.download_url, '_blank');
   };
 
@@ -609,7 +618,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
         <ColumnResizeHandle side="right" active={activeResize === 'right'} onPointerDown={(event) => startColumnResize('right', event)} onDoubleClick={resetColumnWidths} />
         <aside className="right-panel panel-scroll">
           <Tabs defaultActiveKey="summary" items={[
-            { key: 'summary', label: '纪要', children: <SummaryView summary={summary} stale={selectedRecording?.summary_stale} onExport={() => exportMd('summary')} onRegenerate={regenerateSummary} /> },
+            { key: 'summary', label: '纪要', children: <SummaryView summary={summary} stale={selectedRecording?.summary_stale || summary?.stale} onExport={() => exportMd('summary')} onRegenerate={regenerateSummary} /> },
             { key: 'qa', label: '问答', children: <QAView checked={checkedIds} recordings={recordings} threads={threads} currentThreadId={currentThreadId} setCurrentThreadId={setCurrentThreadId} messages={messages} question={qaQuestion} setQuestion={setQaQuestion} onAsk={ask} onNewThread={createThread} submitting={qaSubmitting} waitingForAnswer={pendingQaAnswer} /> }
           ]} />
         </aside>
@@ -859,6 +868,18 @@ function safeParseJson(text: string) {
   } catch {
     return null;
   }
+}
+
+function downloadTextFile(content: string, filename: string) {
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 

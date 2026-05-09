@@ -1,5 +1,6 @@
 from pathlib import Path
 import time
+import re
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -643,11 +644,12 @@ async def create_export(recording_id: str, payload: dict, db: Session = Depends(
         return fail("VALIDATION_ERROR", "只支持导出纪要或清洁稿 Markdown")
     export_id = new_id("exp")
     object_key = f"projects/{recording.project_id}/exports/{export_id}/{export_type}.md"
-    storage.save_text(object_key, _build_markdown(db, recording, export_type))
+    content = _build_markdown(db, recording, export_type)
+    storage.save_text(object_key, content)
     export = ExportFile(id=export_id, project_id=recording.project_id, recording_id=recording.id, export_type=export_type, format="markdown", object_key=object_key, status="ready")
     db.add(export)
     db.commit()
-    return ok({"export_id": export.id, "status": "ready", "download_url": storage.create_download_url(object_key)})
+    return ok({"export_id": export.id, "status": "ready", "filename": _export_filename(recording.file_name, export_type), "content": content, "download_url": storage.create_download_url(object_key)})
 
 
 @app.get("/api/exports/{export_id}")
@@ -673,6 +675,13 @@ def _build_markdown(db: Session, recording: Recording, export_type: str) -> str:
 def fmt_time(ms: int) -> str:
     seconds = ms // 1000
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def _export_filename(file_name: str, export_type: str) -> str:
+    stem = Path(file_name).stem or "recording"
+    safe_stem = re.sub(r'[\\/:*?"<>|]+', "_", stem).strip() or "recording"
+    suffix = "清洁稿" if export_type == "transcript" else "纪要"
+    return f"{safe_stem}-{suffix}.md"
 
 
 @app.get("/api/settings")
