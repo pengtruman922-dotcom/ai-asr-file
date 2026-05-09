@@ -101,11 +101,11 @@ function defaultQaSelection(recordings: Recording[]) {
   return recordings.filter((item) => isRecordingReadyForQa(item.status)).slice(0, 10).map((item) => item.recording_id);
 }
 
-function elapsedSince(value?: string) {
+function elapsedSince(value?: string, now = Date.now()) {
   if (!value) return '';
   const start = new Date(value).getTime();
   if (Number.isNaN(start)) return '';
-  const seconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  const seconds = Math.max(0, Math.floor((now - start) / 1000));
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
@@ -116,6 +116,10 @@ function formatFileSize(bytes?: number) {
   if (!bytes) return '';
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+function recordingTimerStart(recording?: Recording | null) {
+  return recording?.current_job_started_at || recording?.current_job_created_at || recording?.updated_at || recording?.created_at;
 }
 
 function isSameIdSet(left: string[], right: string[]) {
@@ -286,7 +290,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const [queueOpen, setQueueOpen] = useState(false);
   const [columnWidths, setColumnWidths] = useState<ProjectColumnWidths>(loadProjectColumnWidths);
   const [activeResize, setActiveResize] = useState<ResizeDivider | null>(null);
-  const [, setClockTick] = useState(0);
+  const [clockNow, setClockNow] = useState(() => Date.now());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const selectionTouchedRef = useRef(false);
@@ -366,7 +370,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     const hasRunningRecording = recordings.some((item) => isRecordingProcessing(item.status));
     const hasRunningMessage = messages.some((item) => ['queued', 'running'].includes(item.status));
     if (!hasRunningRecording && !hasRunningMessage) return;
-    const timer = window.setInterval(() => setClockTick((tick) => tick + 1), 1000);
+    setClockNow(Date.now());
+    const timer = window.setInterval(() => setClockNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [recordings, messages]);
 
@@ -581,6 +586,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
               active={rec.recording_id === selectedId}
               checked={checkedIds.includes(rec.recording_id)}
               checkDisabled={!isRecordingReadyForQa(rec.status)}
+              clockNow={clockNow}
               onSelect={() => setSelectedId(rec.recording_id)}
               onCheck={(checked) => toggleRecordingCheck(rec.recording_id, checked)}
               onRename={(name) => renameRecording(rec.recording_id, name)}
@@ -592,7 +598,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
         <ColumnResizeHandle side="left" active={activeResize === 'left'} onPointerDown={(event) => startColumnResize('left', event)} onDoubleClick={resetColumnWidths} />
         <main className="middle-panel">
           <div className="middle-toolbar">
-            <div><Text strong>{selectedRecording?.file_name || '请选择录音'}</Text><br /><Text type="secondary">状态：{recordingStatusLabel(selectedRecording?.status || '')}{isRecordingProcessing(selectedRecording?.status) && ` · 已处理 ${elapsedSince(selectedRecording?.updated_at || selectedRecording?.created_at)}`}</Text></div>
+            <div><Text strong>{selectedRecording?.file_name || '请选择录音'}</Text><br /><Text type="secondary">状态：{recordingStatusLabel(selectedRecording?.status || '')}{isRecordingProcessing(selectedRecording?.status) && ` · 已处理 ${elapsedSince(recordingTimerStart(selectedRecording), clockNow)}`}</Text></div>
             <Space><Button onClick={() => setShowRaw((v) => !v)}>{showRaw ? '隐藏原始稿' : '显示原始稿'}</Button><Button icon={<DownloadOutlined />} onClick={() => exportMd('transcript')}>导出清洁稿</Button></Space>
           </div>
           <div className="transcript-list panel-scroll">
@@ -609,7 +615,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
         </aside>
       </div>
       <UploadModal open={uploadOpen} projectId={projectId} onClose={() => setUploadOpen(false)} onCreated={(id) => { setSelectedId(id); void loadProject(); }} onDone={() => { setUploadOpen(false); void loadProject(); }} />
-      <QueueModal open={queueOpen} projectId={projectId} onClose={() => setQueueOpen(false)} onRefresh={() => { void loadProject(); void loadSelected(); }} />
+      <QueueModal open={queueOpen} projectId={projectId} clockNow={clockNow} onClose={() => setQueueOpen(false)} onRefresh={() => { void loadProject(); void loadSelected(); }} />
     </div>
   );
 }
@@ -626,7 +632,7 @@ function ColumnResizeHandle({ side, active, onPointerDown, onDoubleClick }: { si
   />;
 }
 
-function RecordingListItem({ recording, active, checked, checkDisabled, onSelect, onCheck, onRename, onDelete }: { recording: Recording; active: boolean; checked: boolean; checkDisabled: boolean; onSelect: () => void; onCheck: (checked: boolean) => void; onRename: (name: string) => void; onDelete: () => void }) {
+function RecordingListItem({ recording, active, checked, checkDisabled, clockNow, onSelect, onCheck, onRename, onDelete }: { recording: Recording; active: boolean; checked: boolean; checkDisabled: boolean; clockNow: number; onSelect: () => void; onCheck: (checked: boolean) => void; onRename: (name: string) => void; onDelete: () => void }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(recording.file_name);
   const skipBlurSaveRef = useRef(false);
@@ -667,7 +673,7 @@ function RecordingListItem({ recording, active, checked, checkDisabled, onSelect
         </div>
         <Space wrap className="recording-status-line">
           <Tag color={recording.status === 'failed' ? 'red' : isRecordingProcessing(recording.status) ? 'blue' : 'default'}>{recordingStatusLabel(recording.status)}</Tag>
-          {isRecordingProcessing(recording.status) && <Text type="secondary">已处理 {elapsedSince(recording.updated_at || recording.created_at)}</Text>}
+          {isRecordingProcessing(recording.status) && <Text type="secondary">已处理 {elapsedSince(recordingTimerStart(recording), clockNow)}</Text>}
         </Space>
         <Text type="secondary" className="recording-meta">{mediaMeta}</Text>
       </div>
@@ -700,18 +706,18 @@ function SegmentEditor({ segment, showRaw, onJump, onSave }: { segment: Transcri
     onSave({ ...segment, text: draft.text });
   };
   return <Card size="small" className="segment-card">
-    <Space align="start">
-      <Button type="link" onClick={() => onJump(segment.start_time_ms)}>{formatMs(segment.start_time_ms)}</Button>
+    <div className="segment-layout">
+      <Button type="link" className="segment-time" onClick={() => onJump(segment.start_time_ms)}>{formatMs(segment.start_time_ms)}</Button>
       <div className="segment-body">
         <div className="segment-speaker-line">
           {editingSpeaker ? <Space.Compact><Input size="small" value={draft.speaker} onChange={(e) => setDraft({ ...draft, speaker: e.target.value })} onPressEnter={saveSpeaker} /><Button size="small" type="primary" onClick={saveSpeaker}>保存</Button><Button size="small" onClick={() => { setDraft(segment); setEditingSpeaker(false); }}>取消</Button></Space.Compact> : <><Text strong>{segment.speaker}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditingSpeaker(true)} /></>}
         </div>
         <div className="segment-text-line">
-          {editingText ? <Space direction="vertical" style={{ width: '100%' }}><Input.TextArea className="segment-edit-textarea" autoSize={{ minRows: 2, maxRows: 8 }} value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} /><Space><Button size="small" type="primary" onClick={saveText}>保存正文</Button><Button size="small" onClick={() => { setDraft(segment); setEditingText(false); }}>取消</Button></Space></Space> : <><Text>{segment.text}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditingText(true)} /></>}
+          {editingText ? <div className="segment-edit-block"><Input.TextArea className="segment-edit-textarea" variant="borderless" autoSize={{ minRows: 2, maxRows: 12 }} value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} /><Space className="segment-edit-actions"><Button size="small" type="primary" onClick={saveText}>保存正文</Button><Button size="small" onClick={() => { setDraft(segment); setEditingText(false); }}>取消</Button></Space></div> : <><Text className="segment-text">{segment.text}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditingText(true)} /></>}
         </div>
         {showRaw && segment.raw_text && <Paragraph className="raw-text">{segment.raw_text}</Paragraph>}
       </div>
-    </Space>
+    </div>
   </Card>;
 }
 
@@ -761,8 +767,8 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
         {(item.sources || []).slice(0, 3).map((s, idx) => <Paragraph type="secondary" key={idx}>来源：{s.file_name} {formatMs(s.start_time_ms)} - {s.quote}</Paragraph>)}
       </Card>)}
     </div>
-    {waitingForAnswer && <Paragraph type="secondary">AI 正在回答，完成后可继续提问。</Paragraph>}
-    <Input.TextArea rows={3} placeholder="输入问题" value={question} disabled={waitingForAnswer} onChange={(e) => setQuestion(e.target.value)} onPressEnter={(e) => { if (!e.shiftKey) { e.preventDefault(); onAsk(); } }} />
+    {waitingForAnswer && <Paragraph type="secondary">AI 正在回答，完成后可发送下一条问题；你可以先继续输入。</Paragraph>}
+    <Input.TextArea rows={3} placeholder="输入问题" value={question} onChange={(e) => setQuestion(e.target.value)} onPressEnter={(e) => { if (!e.shiftKey) { e.preventDefault(); if (!waitingForAnswer) onAsk(); } }} />
     <Button type="primary" onClick={onAsk} loading={submitting} disabled={waitingForAnswer || !checked.length}>发送</Button>
   </Space>;
 }
@@ -881,9 +887,8 @@ function readAudioDuration(file: File) {
   });
 }
 
-function QueueModal({ open, projectId, onClose, onRefresh }: { open: boolean; projectId: string; onClose: () => void; onRefresh: () => void }) {
+function QueueModal({ open, projectId, clockNow, onClose, onRefresh }: { open: boolean; projectId: string; clockNow: number; onClose: () => void; onRefresh: () => void }) {
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [, setClockTick] = useState(0);
   const load = useCallback(async () => {
     if (!open) return;
     const data = await api<{ items: Job[] }>(`/api/projects/${projectId}/jobs?page_size=50`);
@@ -895,15 +900,10 @@ function QueueModal({ open, projectId, onClose, onRefresh }: { open: boolean; pr
     const timer = window.setInterval(() => { void load(); onRefresh(); }, 3000);
     return () => window.clearInterval(timer);
   }, [open, load, onRefresh]);
-  useEffect(() => {
-    if (!open || !jobs.some((job) => ['queued', 'running'].includes(job.status))) return;
-    const timer = window.setInterval(() => setClockTick((tick) => tick + 1), 1000);
-    return () => window.clearInterval(timer);
-  }, [open, jobs]);
   const retry = async (job: Job) => { await api(`/api/jobs/${job.job_id}/retry`, { method: 'POST' }); message.success('已重试'); void load(); onRefresh(); };
   return <Modal title="处理队列" open={open} onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={900}><Table rowKey="job_id" dataSource={jobs} pagination={false} columns={[
     { title: '任务', dataIndex: 'job_type', render: (value: string) => jobTypeLabel(value) },
-    { title: '状态', dataIndex: 'status', render: (value: string, job: Job) => <Space><Tag color={value === 'failed' ? 'red' : ['queued', 'running'].includes(value) ? 'blue' : 'green'}>{jobStatusLabel(value)}</Tag>{['queued', 'running'].includes(value) && <Text type="secondary">{elapsedSince(job.started_at || job.created_at)}</Text>}</Space> },
+    { title: '状态', dataIndex: 'status', render: (value: string, job: Job) => <Space><Tag color={value === 'failed' ? 'red' : ['queued', 'running'].includes(value) ? 'blue' : 'green'}>{jobStatusLabel(value)}</Tag>{['queued', 'running'].includes(value) && <Text type="secondary">{elapsedSince(job.started_at || job.created_at, clockNow)}</Text>}</Space> },
     { title: '进度', dataIndex: 'progress', width: 150, render: (value: number) => <Progress percent={value || 0} size="small" /> },
     { title: '错误', dataIndex: 'error_message' },
     { title: '操作', render: (_, job) => job.status === 'failed' ? <Button onClick={() => retry(job)}>重试</Button> : null }

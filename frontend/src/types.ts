@@ -18,6 +18,10 @@ export type Recording = {
   summary_stale: boolean;
   created_at?: string;
   updated_at?: string;
+  current_job_type?: string;
+  current_job_status?: string;
+  current_job_created_at?: string;
+  current_job_started_at?: string;
 };
 
 export type TranscriptSegment = {
@@ -37,6 +41,8 @@ export type Job = {
   job_type: string;
   status: string;
   progress: number;
+  external_task_id?: string;
+  metadata?: Record<string, unknown>;
   error_code?: string;
   error_message?: string;
   created_at?: string;

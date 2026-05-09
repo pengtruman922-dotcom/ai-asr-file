@@ -117,11 +117,36 @@ def retry_failed_job(job_id: str) -> str:
 
 
 def _run_asr(job_id: str) -> None:
+    def record_asr_event(event: str, payload: dict | None = None) -> None:
+        with session_scope() as event_session:
+            task_job = event_session.get(ProcessingJob, job_id)
+            if not task_job:
+                return
+            metadata = dict(task_job.metadata_json or {})
+            diagnostics = dict(metadata.get("asr_diagnostics") or {})
+            events = list(diagnostics.get("events") or [])
+            event_payload = payload or {}
+            events.append(
+                {
+                    "event": event,
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "payload": event_payload,
+                }
+            )
+            diagnostics["events"] = events[-80:]
+            diagnostics["last_event"] = event
+            if event == "poll_status":
+                diagnostics["last_status"] = event_payload.get("status")
+                diagnostics["poll_count"] = event_payload.get("poll_count")
+            metadata["asr_diagnostics"] = diagnostics
+            task_job.metadata_json = metadata
+
     with session_scope() as session:
         job = session.get(ProcessingJob, job_id)
         recording = session.get(Recording, job.recording_id)
         audio_url = storage.create_download_url(recording.object_key, expires_in=24 * 3600, storage_config=storage.recording_config(recording))
         file_name = recording.file_name
+        job.metadata_json = {**(job.metadata_json or {}), "asr_file_name": file_name, "asr_file_size_bytes": recording.file_size_bytes}
 
     def save_external_task_id(task_id: str) -> None:
         with session_scope() as task_session:
@@ -130,7 +155,8 @@ def _run_asr(job_id: str) -> None:
                 task_job.external_task_id = task_id
                 task_job.metadata_json = {**(task_job.metadata_json or {}), "asr_task_id": task_id}
 
-    segments = asr_client.transcribe(audio_url, file_name, on_task_id=save_external_task_id)
+    record_asr_event("download_url_created", {"file_name": file_name})
+    segments = asr_client.transcribe(audio_url, file_name, on_task_id=save_external_task_id, on_event=record_asr_event)
 
     with session_scope() as session:
         job = session.get(ProcessingJob, job_id)

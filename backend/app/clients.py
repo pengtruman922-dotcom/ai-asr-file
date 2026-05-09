@@ -15,27 +15,33 @@ class ASRClient:
     def __init__(self):
         self.settings = get_settings()
 
-    def transcribe(self, audio_url: str, file_name: str, on_task_id: Callable[[str], None] | None = None) -> list[dict]:
+    def transcribe(self, audio_url: str, file_name: str, on_task_id: Callable[[str], None] | None = None, on_event: Callable[[str, dict], None] | None = None) -> list[dict]:
         config = get_ai_config("asr")
         api_key = config.get("api_key", "")
         if self._use_local_mock(self.settings.asr_mock_enabled, api_key):
+            self._emit_asr_event(on_event, "mock_used", {"file_name": file_name})
             return self._mock_segments(file_name)
         if not api_key:
             raise RuntimeError("ASR_API_KEY_MISSING: 请先在系统设置中配置 ASR API Key，或在 Railway 变量中配置 ASR_API_KEY。")
 
         submit_url = (config.get("url") or self.settings.asr_api_url).strip().rstrip("/")
         model = (config.get("model") or self.settings.asr_model).strip()
-        task_id = self._submit_task(submit_url, api_key, model, audio_url)
+        self._emit_asr_event(on_event, "submit_start", {"model": model, "url": submit_url})
+        task_id = self._submit_task(submit_url, api_key, model, audio_url, on_event=on_event)
         if on_task_id:
             on_task_id(task_id)
-        result_url = self._wait_for_result(submit_url, api_key, task_id)
+        self._emit_asr_event(on_event, "task_id_received", {"task_id": task_id})
+        result_url = self._wait_for_result(submit_url, api_key, task_id, on_event=on_event)
+        self._emit_asr_event(on_event, "result_download_start", {"task_id": task_id})
         result = self._download_transcription_result(result_url)
+        self._emit_asr_event(on_event, "result_download_complete", {"task_id": task_id})
         segments = self._parse_transcription_result(result)
+        self._emit_asr_event(on_event, "parse_complete", {"task_id": task_id, "segment_count": len(segments)})
         if not segments:
             raise RuntimeError("ASR_RESULT_EMPTY: 识别结果为空，请检查音频是否包含可识别语音。")
         return segments
 
-    def _submit_task(self, submit_url: str, api_key: str, model: str, audio_url: str) -> str:
+    def _submit_task(self, submit_url: str, api_key: str, model: str, audio_url: str, on_event: Callable[[str, dict], None] | None = None) -> str:
         payload = {
             "model": model,
             "input": {"file_urls": [audio_url]},
@@ -52,6 +58,7 @@ class ASRClient:
         if model == "paraformer-v2":
             payload["parameters"]["language_hints"] = ["zh", "en"]
 
+        start = time.monotonic()
         response = requests.post(
             submit_url,
             headers={
@@ -67,13 +74,18 @@ class ASRClient:
         task_id = data.get("output", {}).get("task_id") or data.get("task_id")
         if not task_id:
             raise RuntimeError(f"ASR_SUBMIT_FAILED: 未返回 task_id，响应={self._compact_json(data)}")
+        self._emit_asr_event(on_event, "submit_complete", {"task_id": str(task_id), "elapsed_ms": int((time.monotonic() - start) * 1000)})
         return str(task_id)
 
-    def _wait_for_result(self, submit_url: str, api_key: str, task_id: str) -> str:
+    def _wait_for_result(self, submit_url: str, api_key: str, task_id: str, on_event: Callable[[str, dict], None] | None = None) -> str:
         task_url = self._task_url(submit_url, task_id)
         deadline = time.monotonic() + self.settings.asr_poll_timeout_seconds
         last_payload: dict[str, Any] | None = None
+        poll_count = 0
+        self._emit_asr_event(on_event, "poll_start", {"task_id": task_id, "interval_seconds": self.settings.asr_poll_interval_seconds})
         while time.monotonic() < deadline:
+            poll_count += 1
+            poll_started = time.monotonic()
             response = requests.post(
                 task_url,
                 headers={
@@ -88,9 +100,16 @@ class ASRClient:
             last_payload = payload
             output = payload.get("output") if isinstance(payload.get("output"), dict) else payload
             status = str(output.get("task_status") or output.get("status") or "").upper()
+            self._emit_asr_event(
+                on_event,
+                "poll_status",
+                {"task_id": task_id, "poll_count": poll_count, "status": status or "UNKNOWN", "elapsed_ms": int((time.monotonic() - poll_started) * 1000)},
+            )
 
             if status == "SUCCEEDED":
-                return self._extract_transcription_url(output)
+                result_url = self._extract_transcription_url(output)
+                self._emit_asr_event(on_event, "result_url_received", {"task_id": task_id, "poll_count": poll_count})
+                return result_url
             if status in {"FAILED", "CANCELED", "CANCELLED"}:
                 message = output.get("message") or payload.get("message") or self._compact_json(output)
                 raise RuntimeError(f"ASR_TASK_FAILED: task_id={task_id}, status={status}, message={message}")
@@ -100,6 +119,14 @@ class ASRClient:
             time.sleep(self.settings.asr_poll_interval_seconds)
 
         raise RuntimeError(f"ASR_TASK_TIMEOUT: task_id={task_id}, last_response={self._compact_json(last_payload or {})}")
+
+    def _emit_asr_event(self, callback: Callable[[str, dict], None] | None, event: str, payload: dict | None = None) -> None:
+        if not callback:
+            return
+        try:
+            callback(event, payload or {})
+        except Exception:
+            pass
 
     def _extract_transcription_url(self, output: dict) -> str:
         results = output.get("results") or []

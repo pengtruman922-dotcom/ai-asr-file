@@ -65,8 +65,16 @@ def project_payload(project: Project, db: Session):
     }
 
 
-def recording_payload(recording: Recording):
-    return {
+def recording_payload(recording: Recording, db: Session | None = None):
+    current_job = None
+    if db and recording.status not in {"created", "completed", "failed"}:
+        current_job = (
+            db.query(ProcessingJob)
+            .filter(ProcessingJob.recording_id == recording.id, ProcessingJob.status.in_(["queued", "running"]))
+            .order_by(ProcessingJob.created_at.desc())
+            .first()
+        )
+    payload = {
         "recording_id": recording.id,
         "project_id": recording.project_id,
         "file_name": recording.file_name,
@@ -88,6 +96,16 @@ def recording_payload(recording: Recording):
         "created_at": serialize_dt(recording.created_at),
         "updated_at": serialize_dt(recording.updated_at),
     }
+    if current_job:
+        payload.update(
+            {
+                "current_job_type": current_job.job_type,
+                "current_job_status": current_job.status,
+                "current_job_created_at": serialize_dt(current_job.created_at),
+                "current_job_started_at": serialize_dt(current_job.started_at),
+            }
+        )
+    return payload
 
 
 def job_payload(job: ProcessingJob):
@@ -98,6 +116,8 @@ def job_payload(job: ProcessingJob):
         "job_type": job.job_type,
         "status": job.status,
         "progress": job.progress,
+        "external_task_id": job.external_task_id,
+        "metadata": job.metadata_json,
         "error_code": job.error_code,
         "error_message": job.error_message,
         "created_at": serialize_dt(job.created_at),
@@ -372,7 +392,7 @@ def list_recordings(project_id: str, keyword: str = "", page: int = 1, page_size
         query = query.filter(Recording.file_name.contains(keyword))
     total = query.count()
     items = query.order_by(Recording.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
-    return ok({"items": [recording_payload(item) for item in items], "page": page, "page_size": page_size, "total": total})
+    return ok({"items": [recording_payload(item, db) for item in items], "page": page, "page_size": page_size, "total": total})
 
 
 @app.get("/api/recordings/{recording_id}")
@@ -380,7 +400,7 @@ def get_recording(recording_id: str, db: Session = Depends(get_db)):
     recording = db.get(Recording, recording_id)
     if not recording:
         return fail("RECORDING_NOT_FOUND", "录音不存在", status_code=404)
-    return ok(recording_payload(recording))
+    return ok(recording_payload(recording, db))
 
 
 @app.patch("/api/recordings/{recording_id}")
@@ -393,7 +413,7 @@ async def update_recording(recording_id: str, payload: dict, db: Session = Depen
         return fail("VALIDATION_ERROR", "文件名称不能为空")
     recording.file_name = file_name
     db.commit()
-    return ok(recording_payload(recording))
+    return ok(recording_payload(recording, db))
 
 
 @app.delete("/api/recordings/{recording_id}")
