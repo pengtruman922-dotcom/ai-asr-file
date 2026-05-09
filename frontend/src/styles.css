@@ -53,6 +53,9 @@ body { background: #f4f0e8; color: #1d2433; }
 .qa-messages { display: grid; gap: 10px; max-height: 52vh; overflow-y: auto; padding-right: 4px; }
 .qa-user { background: #fffaf0; }
 .qa-assistant { background: #f7fbff; }
+.qa-reasoning { margin: 8px 0; color: #5f6b7a; }
+.qa-reasoning summary { cursor: pointer; font-size: 12px; }
+.qa-reasoning pre { margin-top: 6px; max-height: 180px; overflow: auto; background: #eef4ff; color: #334155; padding: 10px; border-radius: 8px; }
 .markdown-body h3, .markdown-body h4, .markdown-body h5 { margin: 14px 0 8px; }
 .markdown-body .ant-typography { margin-bottom: 6px; }
 .md-gap { height: 8px; }

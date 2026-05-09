@@ -541,64 +541,57 @@ class LLMClient:
         config = get_ai_config("qa")
         api_key = config.get("api_key", "")
         if self._use_local_mock(self.settings.llm_mock_enabled, api_key):
-            sources = []
-            for material in materials:
-                for seg in material["segments"]:
-                    if seg["speaker"] in {"客户", "专家", "内部受访人", "说话人", "说话人1", "说话人2"}:
-                        sources.append(
-                            {
-                                "recording_id": material["recording_id"],
-                                "file_name": material["file_name"],
-                                "start_time_ms": seg["start_time_ms"],
-                                "end_time_ms": seg["end_time_ms"],
-                                "quote": seg["text"],
-                            }
-                        )
-                        break
             return {
-                "answer": "基于已选访谈，客户的核心需求集中在统一数据口径、建立数据治理责任机制、降低跨部门协同成本，并在系统建设前先推动管理机制达成一致。",
-                "answer_markdown": "客户的核心需求可以归纳为三类：\n\n1. **统一数据口径**：客户认为当前开会经常先争数据口径。\n2. **建立治理机制**：需要先明确关键指标和责任机制。\n3. **降低跨部门协同成本**：系统建设需要配合流程和组织调整。",
-                "key_points": [
-                    {"title": "统一数据口径", "detail": "客户认为当前开会经常先争数据口径。", "sources": sources[:1]},
-                    {"title": "组织流程配合", "detail": "客户担心业务部门不愿意改变现有流程。", "sources": sources[1:2] or sources[:1]},
-                ],
-                "sources": sources,
-                "uncertainties": [],
+                "answer": "这是本地模拟回答：请优先参考已选文件内容回答用户问题，并在引用材料时注明文件名和时间点。",
+                "answer_markdown": "这是本地模拟回答：请优先参考已选文件内容回答用户问题，并在引用材料时注明文件名和时间点。",
+                "sources": [],
             }
         if not api_key:
             raise RuntimeError("LLM_API_KEY_MISSING: 请先在系统设置中配置问答模型 API Key。")
+        system, prompt = self._qa_prompt(question, materials, history)
+        content = self._chat_plain(
+            config.get("url", self.settings.llm_qa_base_url),
+            api_key,
+            config.get("model", self.settings.llm_qa_model),
+            system,
+            prompt,
+        )
+        return self._sanitize_qa_output({"answer": content.strip(), "answer_markdown": content.strip(), "sources": []})
+
+    def answer_stream(self, question: str, materials: list[dict], history: list[dict] | None = None) -> Any:
+        config = get_ai_config("qa")
+        api_key = config.get("api_key", "")
+        if self._use_local_mock(self.settings.llm_mock_enabled, api_key):
+            mock_text = "这是本地模拟回答：我会优先参考已选文件内容和最近对话上下文；引用材料时会注明文件名和时间点。"
+            for piece in self._chunk_text(mock_text, 12):
+                yield {"type": "content", "delta": piece}
+            return
+        if not api_key:
+            raise RuntimeError("LLM_API_KEY_MISSING: 请先在系统设置中配置问答模型 API Key。")
+        system, prompt = self._qa_prompt(question, materials, history)
+        yield from self._chat_stream(
+            config.get("url", self.settings.llm_qa_base_url),
+            api_key,
+            config.get("model", self.settings.llm_qa_model),
+            system,
+            prompt,
+        )
+
+    def _qa_prompt(self, question: str, materials: list[dict], history: list[dict] | None = None) -> tuple[str, str]:
         prompt_materials = [{"file_name": item.get("file_name", ""), "segments": item.get("segments", [])} for item in materials]
+        system = "请回答用户问题。优先参考给定文件内容和最近对话上下文；不要编造文件中没有的事实；引用文件内容时注明来源文件名和时间点；如果资料不足，请直接说明。不要输出内部ID。"
         prompt = json.dumps(
             {
                 "question": question,
                 "materials": prompt_materials,
                 "recent_history": history or [],
-                "output_schema": {
-                    "answer_markdown": "Markdown 回答",
-                    "sources": [
-                        {
-                            "file_name": "文件名",
-                            "start_time_ms": 0,
-                            "end_time_ms": 0,
-                            "quote": "可引用原文",
-                        }
-                    ],
-                    "uncertainties": ["无法从材料确认的事项"],
-                },
             },
             ensure_ascii=False,
         )
-        content = self._chat_json(
-            config.get("url", self.settings.llm_qa_base_url),
-            api_key,
-            config.get("model", self.settings.llm_qa_model),
-            "你是咨询顾问的项目资料分析助手。优先参考给定访谈材料回答，并给出适合需求分析、方案编写或报告引用的结论；如果材料中没有直接相关内容，可以基于通用咨询经验回答，但要明确说明这是通用建议或推断。不要输出任何内部ID、段落ID或字段名。只返回 JSON。",
-            prompt,
-        )
-        data = self._loads_json(content)
-        if not isinstance(data, dict):
-            raise RuntimeError("LLM_QA_INVALID_JSON: 问答模型未返回 JSON 对象。")
-        return self._sanitize_qa_output(data)
+        return system, prompt
+
+    def _chunk_text(self, text: str, size: int) -> list[str]:
+        return [text[index : index + size] for index in range(0, len(text), size)]
 
     def _sanitize_qa_output(self, data: dict) -> dict:
         for key in ("answer", "answer_markdown"):
@@ -665,6 +658,66 @@ class LLMClient:
             raise requests.HTTPError(f"LLM_CALL_FAILED: HTTP {response.status_code}, {message}", response=response) from exc
         data = response.json()
         return data["choices"][0]["message"]["content"]
+
+    def _chat_stream(self, base_url: str, api_key: str, model: str, system: str, user: str) -> Any:
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "temperature": 0.2,
+            "stream": True,
+        }
+        with requests.post(
+            self._chat_endpoint(base_url),
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=self.settings.llm_timeout_seconds,
+            stream=True,
+        ) as response:
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as exc:
+                message = self._safe_response_text(response)
+                raise requests.HTTPError(f"LLM_CALL_FAILED: HTTP {response.status_code}, {message}", response=response) from exc
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="ignore")
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                raw = line.removeprefix("data:").strip()
+                if raw == "[DONE]":
+                    break
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or choices[0].get("message") or {}
+                reasoning = self._delta_to_text(delta.get("reasoning_content") or delta.get("reasoning"))
+                content = self._delta_to_text(delta.get("content"))
+                if reasoning:
+                    yield {"type": "reasoning", "delta": reasoning}
+                if content:
+                    yield {"type": "content", "delta": content}
+
+    def _delta_to_text(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    parts.append(str(item.get("text") or item.get("content") or ""))
+            return "".join(parts)
+        return str(value)
 
     def _chat_endpoint(self, base_url: str) -> str:
         endpoint = (base_url or self.settings.llm_clean_base_url).strip().rstrip("/")

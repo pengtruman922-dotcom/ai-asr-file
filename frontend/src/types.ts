@@ -81,6 +81,7 @@ export type QAMessage = {
   thread_id: string;
   role: 'user' | 'assistant';
   content: string;
+  reasoning_content?: string;
   selected_recording_ids: string[];
   sources: Array<{ file_name: string; start_time_ms: number; quote: string }>;
   status: string;

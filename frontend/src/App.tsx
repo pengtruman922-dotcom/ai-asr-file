@@ -126,6 +126,55 @@ function isSameIdSet(left: string[], right: string[]) {
   return left.length === right.length && left.every((id) => right.includes(id));
 }
 
+type QaStreamEvent = { event: string; data: Record<string, any> };
+
+async function postQaStream(threadId: string, payload: { recording_ids: string[]; question: string }, onEvent: (event: QaStreamEvent) => void) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(`/api/qa-threads/${threadId}/messages/stream`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok || !response.body) {
+    const data = await response.json().catch(() => null);
+    throw new Error(data?.error?.message || data?.detail || '问题提交失败');
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    buffer = parseQaStreamBuffer(buffer, onEvent);
+  }
+  buffer += decoder.decode();
+  parseQaStreamBuffer(buffer, onEvent, true);
+}
+
+function parseQaStreamBuffer(buffer: string, onEvent: (event: QaStreamEvent) => void, flush = false) {
+  let normalized = buffer.replace(/\r\n/g, '\n');
+  let index = normalized.indexOf('\n\n');
+  while (index >= 0) {
+    const block = normalized.slice(0, index);
+    normalized = normalized.slice(index + 2);
+    emitQaStreamBlock(block, onEvent);
+    index = normalized.indexOf('\n\n');
+  }
+  if (flush && normalized.trim()) emitQaStreamBlock(normalized, onEvent);
+  return normalized;
+}
+
+function emitQaStreamBlock(block: string, onEvent: (event: QaStreamEvent) => void) {
+  const lines = block.split('\n');
+  const event = lines.find((line) => line.startsWith('event:'))?.replace(/^event:\s*/, '') || 'message';
+  const data = lines.filter((line) => line.startsWith('data:')).map((line) => line.replace(/^data:\s*/, '')).join('\n');
+  if (!data) return;
+  onEvent({ event, data: JSON.parse(data) });
+}
+
 function App() {
   const [token, setTokenState] = useState(getToken());
   const [route, setRoute] = useState(readRoute);
@@ -286,6 +335,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const [messages, setMessages] = useState<QAMessage[]>([]);
   const [qaQuestion, setQaQuestion] = useState('');
   const [qaSubmitting, setQaSubmitting] = useState(false);
+  const [qaStreaming, setQaStreaming] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
   const [columnWidths, setColumnWidths] = useState<ProjectColumnWidths>(loadProjectColumnWidths);
@@ -356,7 +406,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   useEffect(() => { void loadThread(); }, [loadThread]);
   useEffect(() => {
     const hasRunningRecording = recordings.some((item) => isRecordingProcessing(item.status));
-    const hasRunningMessage = messages.some((item) => ['queued', 'running'].includes(item.status));
+    const hasRunningMessage = !qaStreaming && messages.some((item) => ['queued', 'running'].includes(item.status));
     if (!hasRunningRecording && !hasRunningMessage) return;
     const timer = window.setInterval(() => {
       void loadProject();
@@ -364,7 +414,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
       void loadThread();
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [recordings, messages, loadProject, loadSelected, loadThread]);
+  }, [recordings, messages, qaStreaming, loadProject, loadSelected, loadThread]);
 
   useEffect(() => {
     const hasRunningRecording = recordings.some((item) => isRecordingProcessing(item.status));
@@ -518,22 +568,58 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
       setCurrentThreadId(threadId);
     }
     const now = new Date().toISOString();
+    const tmpUserId = `tmp_user_${Date.now()}`;
+    const tmpAiId = `tmp_ai_${Date.now()}`;
+    let userMessageId = tmpUserId;
+    let assistantMessageId = tmpAiId;
     setQaQuestion('');
     setMessages((prev) => [
       ...prev,
-      { message_id: `tmp_user_${Date.now()}`, thread_id: threadId!, role: 'user', content: question, selected_recording_ids: qaRecordingIds, sources: [], status: 'ready', created_at: now },
-      { message_id: `tmp_ai_${Date.now()}`, thread_id: threadId!, role: 'assistant', content: '', selected_recording_ids: qaRecordingIds, sources: [], status: 'queued', created_at: now },
+      { message_id: tmpUserId, thread_id: threadId!, role: 'user', content: question, selected_recording_ids: qaRecordingIds, sources: [], status: 'ready', created_at: now },
+      { message_id: tmpAiId, thread_id: threadId!, role: 'assistant', content: '', reasoning_content: '', selected_recording_ids: qaRecordingIds, sources: [], status: 'running', created_at: now },
     ]);
     setQaSubmitting(true);
+    setQaStreaming(true);
     try {
-      await api(`/api/qa-threads/${threadId}/messages`, { method: 'POST', body: JSON.stringify({ recording_ids: qaRecordingIds, question }) });
+      await postQaStream(threadId, { recording_ids: qaRecordingIds, question }, ({ event, data }) => {
+        if (event === 'created') {
+          userMessageId = String(data.user_message_id || userMessageId);
+          assistantMessageId = String(data.assistant_message_id || assistantMessageId);
+          setMessages((prev) => prev.map((item) => {
+            if (item.message_id === tmpUserId) return { ...item, message_id: userMessageId };
+            if (item.message_id === tmpAiId) return { ...item, message_id: assistantMessageId, status: 'running' };
+            return item;
+          }));
+          setQaSubmitting(false);
+          return;
+        }
+        if (event === 'reasoning' || event === 'content') {
+          setMessages((prev) => prev.map((item) => {
+            if (item.message_id !== assistantMessageId) return item;
+            if (event === 'reasoning') return { ...item, status: 'running', reasoning_content: `${item.reasoning_content || ''}${data.delta || ''}` };
+            return { ...item, status: 'running', content: `${item.content || ''}${data.delta || ''}` };
+          }));
+          return;
+        }
+        if (event === 'done') {
+          setMessages((prev) => prev.map((item) => item.message_id === assistantMessageId ? { ...item, status: 'ready', content: String(data.content || item.content || ''), reasoning_content: String(data.reasoning_content || item.reasoning_content || '') } : item));
+          return;
+        }
+        if (event === 'error') {
+          const errorMessage = String(data.message || 'AI 回答失败');
+          setMessages((prev) => prev.map((item) => item.message_id === assistantMessageId ? { ...item, status: 'failed', content: item.content || errorMessage } : item));
+          throw new Error(errorMessage);
+        }
+      });
       void loadThreads();
       void loadThread();
     } catch (error) {
       message.error(error instanceof Error ? error.message : '问题提交失败');
+      setMessages((prev) => prev.map((item) => item.message_id === assistantMessageId ? { ...item, status: 'failed' } : item));
       void loadThread();
     } finally {
       setQaSubmitting(false);
+      setQaStreaming(false);
     }
   };
 
@@ -784,7 +870,11 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
     <div className="qa-messages">
       {messages.map((item) => <Card key={item.message_id} size="small" className={item.role === 'user' ? 'qa-user' : 'qa-assistant'}>
         <Text strong>{item.role === 'user' ? '用户' : 'AI'}</Text>
-        {['queued', 'running'].includes(item.status) ? <Paragraph>生成中...</Paragraph> : item.status === 'failed' ? <Paragraph type="danger">生成失败，请稍后重试</Paragraph> : <MarkdownLite markdown={item.content || item.status} />}
+        {item.role === 'assistant' && item.reasoning_content && <details className="qa-reasoning" open={item.status === 'running'}>
+          <summary>{item.status === 'running' ? '思考过程生成中' : '思考过程'}</summary>
+          <pre>{item.reasoning_content}</pre>
+        </details>}
+        {item.status === 'failed' ? <Paragraph type="danger">{item.content || '生成失败，请稍后重试'}</Paragraph> : <MarkdownLite markdown={item.content || (['queued', 'running'].includes(item.status) ? '生成中...' : item.status)} />}
         {item.role === 'assistant' && <Paragraph type="secondary">本轮参考材料：{item.selected_recording_ids?.length || 0} 份</Paragraph>}
         {(item.sources || []).slice(0, 3).map((s, idx) => <Paragraph type="secondary" key={idx}>来源：{s.file_name} {formatMs(s.start_time_ms)} - {s.quote}</Paragraph>)}
       </Card>)}

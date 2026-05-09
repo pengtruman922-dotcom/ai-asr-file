@@ -1,17 +1,20 @@
 from pathlib import Path
+from datetime import datetime, timezone
+import json
 import time
 import re
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import requests
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from .clients import llm_client
 from .config import get_settings
-from .database import get_db, init_db
+from .database import get_db, init_db, session_scope
 from .models import (
     CleanTranscriptSegment,
     ExportFile,
@@ -26,7 +29,7 @@ from .models import (
     UsageRecord,
 )
 from .storage import storage
-from .settings_service import AI_NODES, get_app_settings, get_basic_config, public_app_settings, resolve_storage_config, save_app_settings
+from .settings_service import AI_NODES, get_ai_config, get_app_settings, get_basic_config, public_app_settings, resolve_storage_config, save_app_settings
 from .tasks import create_job, enqueue_job, retry_failed_job
 from .utils import fail, make_token, new_id, ok, require_auth, serialize_dt
 
@@ -588,6 +591,57 @@ async def create_qa_message(thread_id: str, payload: dict, db: Session = Depends
     return ok({"thread_id": thread.id, "user_message_id": user_msg.id, "assistant_message_id": assistant_msg.id, "job_id": job.id, "status": "queued"})
 
 
+@app.post("/api/qa-threads/{thread_id}/messages/stream")
+async def create_qa_message_stream(thread_id: str, payload: dict, db: Session = Depends(get_db)):
+    thread = db.get(QAThread, thread_id)
+    if not thread:
+        return fail("QA_THREAD_NOT_FOUND", "对话不存在", status_code=404)
+    pending = (
+        db.query(QAMessage)
+        .filter(QAMessage.thread_id == thread.id, QAMessage.role == "assistant", QAMessage.status.in_(["queued", "running"]))
+        .first()
+    )
+    if pending:
+        return fail("QA_IN_PROGRESS", "当前对话正在生成回答，请等待完成后再继续提问")
+    recording_ids = payload.get("recording_ids") or []
+    if len(recording_ids) > settings.max_qa_recordings:
+        return fail("VALIDATION_ERROR", "最多选择 10 份录音")
+    if not recording_ids:
+        return fail("VALIDATION_ERROR", "请至少选择 1 份录音")
+    question = (payload.get("question") or "").strip()
+    if not question:
+        return fail("VALIDATION_ERROR", "请输入问题")
+    selected_recordings = db.query(Recording).filter(Recording.project_id == thread.project_id, Recording.id.in_(recording_ids)).all()
+    if len(selected_recordings) != len(recording_ids):
+        return fail("VALIDATION_ERROR", "包含不属于当前项目的录音")
+    not_ready = [recording.file_name for recording in selected_recordings if recording.status != "completed"]
+    if not_ready:
+        return fail("QA_RECORDING_NOT_READY", f"以下录音尚未处理完成，不能用于问答：{', '.join(not_ready[:3])}")
+
+    user_msg = QAMessage(id=new_id("qamsg"), thread_id=thread.id, project_id=thread.project_id, role="user", content=question, selected_recording_ids=recording_ids, status="ready")
+    assistant_msg = QAMessage(id=new_id("qamsg"), thread_id=thread.id, project_id=thread.project_id, role="assistant", content="", reasoning_content="", selected_recording_ids=recording_ids, status="running")
+    db.add(user_msg)
+    db.add(assistant_msg)
+    if thread.title == "新对话":
+        thread.title = question[:10]
+    db.flush()
+    materials, history, total_chars = _build_qa_context(db, thread, recording_ids, user_msg.id, assistant_msg.id)
+    if total_chars > 100000:
+        db.rollback()
+        return fail("LLM_CONTEXT_TOO_LONG", "已选录音清洁稿超过模型上下文上限，请减少文件数量。")
+    job = create_job(db, thread.project_id, None, "qa_answer", {"thread_id": thread.id, "user_message_id": user_msg.id, "assistant_message_id": assistant_msg.id, "stream": True})
+    job.status = "running"
+    job.started_at = datetime.now(timezone.utc)
+    job.progress = 20
+    db.commit()
+
+    return StreamingResponse(
+        _stream_qa_answer(thread.id, user_msg.id, assistant_msg.id, job.id, question, materials, history, total_chars),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 def thread_payload(thread: QAThread, db: Session, include_messages: bool = False):
     messages = db.query(QAMessage).filter_by(thread_id=thread.id).order_by(QAMessage.created_at.asc()).all()
     first_user = next((msg for msg in messages if msg.role == "user"), None)
@@ -611,6 +665,7 @@ def message_payload(msg: QAMessage):
         "thread_id": msg.thread_id,
         "role": msg.role,
         "content": msg.content,
+        "reasoning_content": msg.reasoning_content,
         "selected_recording_ids": msg.selected_recording_ids,
         "sources": msg.sources,
         "status": msg.status,
@@ -618,6 +673,123 @@ def message_payload(msg: QAMessage):
         "error_code": msg.error_code,
         "created_at": serialize_dt(msg.created_at),
     }
+
+
+def _build_qa_context(db: Session, thread: QAThread, recording_ids: list[str], user_message_id: str, assistant_message_id: str):
+    recordings = db.query(Recording).filter(Recording.id.in_(recording_ids)).all()
+    recording_by_id = {recording.id: recording for recording in recordings}
+    materials = []
+    total_chars = 0
+    for recording_id in recording_ids:
+        recording = recording_by_id.get(recording_id)
+        if not recording:
+            continue
+        segments = [
+            {"speaker": seg.speaker, "start_time_ms": seg.start_time_ms, "end_time_ms": seg.end_time_ms, "text": seg.text}
+            for seg in db.query(CleanTranscriptSegment).filter_by(recording_id=recording.id).order_by(CleanTranscriptSegment.start_time_ms).all()
+        ]
+        total_chars += sum(len(seg["text"]) for seg in segments)
+        materials.append({"recording_id": recording.id, "file_name": recording.file_name, "segments": segments})
+    previous_messages = (
+        db.query(QAMessage)
+        .filter(QAMessage.thread_id == thread.id, QAMessage.id.notin_([user_message_id, assistant_message_id]))
+        .order_by(QAMessage.created_at.desc())
+        .limit(8)
+        .all()
+    )
+    history = [
+        {
+            "role": msg.role,
+            "content": msg.content,
+            "selected_recording_ids": msg.selected_recording_ids,
+        }
+        for msg in reversed(previous_messages)
+    ]
+    return materials, history, total_chars
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _stream_qa_answer(thread_id: str, user_message_id: str, assistant_message_id: str, job_id: str, question: str, materials: list[dict], history: list[dict], total_chars: int):
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    yield _sse(
+        "created",
+        {
+            "thread_id": thread_id,
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+            "job_id": job_id,
+        },
+    )
+    try:
+        for chunk in llm_client.answer_stream(question, materials, history=history):
+            chunk_type = chunk.get("type")
+            delta = str(chunk.get("delta") or "")
+            if not delta:
+                continue
+            if chunk_type == "reasoning":
+                reasoning_parts.append(delta)
+                yield _sse("reasoning", {"delta": delta})
+            else:
+                content_parts.append(delta)
+                yield _sse("content", {"delta": delta})
+        content = re.sub(r"[\s\(（\[]*seg_[0-9A-Za-z_-]+[\)）\]]*", "", "".join(content_parts)).strip()
+        reasoning = "".join(reasoning_parts).strip()
+        with session_scope() as session:
+            assistant_message = session.get(QAMessage, assistant_message_id)
+            thread = session.get(QAThread, thread_id)
+            job = session.get(ProcessingJob, job_id)
+            if assistant_message:
+                assistant_message.content = content
+                assistant_message.reasoning_content = reasoning
+                assistant_message.status = "ready"
+                assistant_message.usage = {"input_chars": total_chars, "model": get_ai_config("qa").get("model", get_settings().llm_qa_model), "stream": True}
+            if thread:
+                thread.updated_at = datetime.now(timezone.utc)
+            if job:
+                job.status = "succeeded"
+                job.progress = 100
+                job.finished_at = datetime.now(timezone.utc)
+            session.add(
+                UsageRecord(
+                    id=new_id("use"),
+                    project_id=thread.project_id if thread else None,
+                    job_id=job_id,
+                    call_type="qa",
+                    model_provider="aliyun/mock",
+                    model_name=get_ai_config("qa").get("model", get_settings().llm_qa_model),
+                    input_tokens=total_chars,
+                    output_tokens=len(content),
+                    status="succeeded",
+                )
+            )
+        yield _sse(
+            "done",
+            {
+                "content": content,
+                "reasoning_content": reasoning,
+                "assistant_message_id": assistant_message_id,
+            },
+        )
+    except Exception as exc:
+        with session_scope() as session:
+            assistant_message = session.get(QAMessage, assistant_message_id)
+            job = session.get(ProcessingJob, job_id)
+            if assistant_message:
+                assistant_message.content = "".join(content_parts).strip()
+                assistant_message.reasoning_content = "".join(reasoning_parts).strip()
+                assistant_message.status = "failed"
+                assistant_message.error_code = "LLM_CALL_FAILED"
+            if job:
+                job.status = "failed"
+                job.progress = 100
+                job.error_code = "LLM_CALL_FAILED"
+                job.error_message = str(exc)
+                job.finished_at = datetime.now(timezone.utc)
+        yield _sse("error", {"code": "LLM_CALL_FAILED", "message": str(exc)})
 
 
 @app.get("/api/jobs/recent")
