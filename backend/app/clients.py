@@ -2,6 +2,7 @@ import json
 import re
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.parse import urlparse
 
@@ -326,10 +327,11 @@ class LLMClient:
     def __init__(self):
         self.settings = get_settings()
 
-    def clean_segments(self, raw_segments: list[dict]) -> list[dict]:
+    def clean_segments(self, raw_segments: list[dict], on_event: Callable[[str, dict], None] | None = None) -> list[dict]:
         config = get_ai_config("clean")
         api_key = config.get("api_key", "")
         if self._use_local_mock(self.settings.llm_mock_enabled, api_key):
+            self._emit_clean_event(on_event, "mock_used", {"segment_count": len(raw_segments)})
             return [
                 {
                     "raw_segment_id": item["id"],
@@ -342,14 +344,78 @@ class LLMClient:
             ]
         if not api_key:
             raise RuntimeError("LLM_API_KEY_MISSING: 请先在系统设置中配置清洁稿模型 API Key。")
+
+        batches = self._split_clean_batches(raw_segments)
+        batch_count = len(batches)
+        if batch_count == 0:
+            return []
+        max_workers = max(1, min(self.settings.llm_clean_batch_concurrency, batch_count))
+        self._emit_clean_event(
+            on_event,
+            "batch_plan",
+            {
+                "segment_count": len(raw_segments),
+                "batch_count": batch_count,
+                "max_workers": max_workers,
+                "max_segments": self.settings.llm_clean_batch_max_segments,
+                "max_chars": self.settings.llm_clean_batch_max_chars,
+            },
+        )
+
+        results: list[list[dict] | None] = [None] * batch_count
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {}
+            for index, batch in enumerate(batches, start=1):
+                self._emit_clean_event(on_event, "batch_submitted", self._clean_batch_payload(index, batch_count, batch))
+                future = executor.submit(self._clean_segment_batch, config, api_key, batch, index, batch_count)
+                future_map[future] = (index, batch)
+            for future in as_completed(future_map):
+                index, batch = future_map[future]
+                try:
+                    results[index - 1] = future.result()
+                except Exception as exc:
+                    self._emit_clean_event(on_event, "batch_failed", {**self._clean_batch_payload(index, batch_count, batch), "error": str(exc)})
+                    raise RuntimeError(f"LLM_CLEAN_BATCH_FAILED: 第 {index}/{batch_count} 批清洁稿生成失败：{exc}") from exc
+                self._emit_clean_event(on_event, "batch_completed", self._clean_batch_payload(index, batch_count, batch))
+
+        cleaned = [item for batch_result in results for item in (batch_result or [])]
+        self._emit_clean_event(on_event, "all_batches_completed", {"batch_count": batch_count, "segment_count": len(cleaned)})
+        return cleaned
+
+    def _split_clean_batches(self, raw_segments: list[dict]) -> list[list[dict]]:
+        batches: list[list[dict]] = []
+        current: list[dict] = []
+        current_chars = 0
+        max_segments = max(1, self.settings.llm_clean_batch_max_segments)
+        max_chars = max(1000, self.settings.llm_clean_batch_max_chars)
+        for segment in raw_segments:
+            segment_chars = len(str(segment.get("text") or ""))
+            should_flush = current and (len(current) >= max_segments or current_chars + segment_chars > max_chars)
+            if should_flush:
+                batches.append(current)
+                current = []
+                current_chars = 0
+            current.append(segment)
+            current_chars += segment_chars
+        if current:
+            batches.append(current)
+        return batches
+
+    def _clean_segment_batch(self, config: dict, api_key: str, raw_segments: list[dict], batch_index: int, batch_count: int) -> list[dict]:
         content = self._chat_json(
             config.get("url", self.settings.llm_clean_base_url),
             api_key,
             config.get("model", self.settings.llm_clean_model),
-            "你是咨询访谈转写清洁助手。请修正明显错别字、标点和断句，保留原意、说话人、时间戳，不要扩写。只返回 JSON。",
+            "你是咨询访谈转写清洁助手。请修正明显错别字、标点和断句，保留原意、说话人、时间戳，不要扩写、合并或删除段落。只返回 JSON。",
             json.dumps(
                 {
                     "task": "clean_transcript_segments",
+                    "batch": {"index": batch_index, "total": batch_count},
+                    "rules": [
+                        "返回 segments 数组，数量和输入 segments 保持一致",
+                        "每个输出段落必须保留对应 raw_segment_id、speaker、start_time_ms、end_time_ms",
+                        "clean_text 只做可读性清洁，不要总结、扩写或改变原意",
+                    ],
                     "output_schema": {
                         "segments": [
                             {
@@ -367,16 +433,29 @@ class LLMClient:
             ),
         )
         data = self._loads_json(content)
-        segments = data.get("segments") if isinstance(data, dict) else None
+        segments = data.get("segments") if isinstance(data, dict) else data
         if not isinstance(segments, list):
             raise RuntimeError("LLM_CLEAN_INVALID_JSON: 清洁稿模型未返回 segments 数组。")
+        return self._normalize_clean_segments(raw_segments, segments)
+
+    def _normalize_clean_segments(self, raw_segments: list[dict], segments: list) -> list[dict]:
         cleaned = []
         raw_by_id = {item["id"]: item for item in raw_segments}
+        parsed_by_id: dict[str, dict] = {}
+        parsed_by_index: dict[int, dict] = {}
         for index, item in enumerate(segments):
             if not isinstance(item, dict):
                 continue
             raw_id = item.get("raw_segment_id") or item.get("id") or (raw_segments[index]["id"] if index < len(raw_segments) else None)
-            raw = raw_by_id.get(raw_id) or (raw_segments[index] if index < len(raw_segments) else {})
+            if raw_id:
+                parsed_by_id[str(raw_id)] = item
+            parsed_by_index[index] = item
+
+        for index, raw in enumerate(raw_segments):
+            item = parsed_by_id.get(str(raw["id"])) or parsed_by_index.get(index) or {}
+            raw_id = item.get("raw_segment_id") or item.get("id") or raw["id"]
+            if raw_id not in raw_by_id:
+                raw_id = raw["id"]
             cleaned.append(
                 {
                     "raw_segment_id": raw_id,
@@ -387,6 +466,18 @@ class LLMClient:
                 }
             )
         return cleaned
+
+    def _clean_batch_payload(self, batch_index: int, batch_count: int, batch: list[dict]) -> dict:
+        return {
+            "batch_index": batch_index,
+            "batch_count": batch_count,
+            "segment_count": len(batch),
+            "char_count": sum(len(str(item.get("text") or "")) for item in batch),
+        }
+
+    def _emit_clean_event(self, on_event: Callable[[str, dict], None] | None, event: str, payload: dict | None = None) -> None:
+        if on_event:
+            on_event(event, payload or {})
 
     def summarize(self, clean_segments: list[dict], template_type: str) -> dict:
         config = get_ai_config("summary")

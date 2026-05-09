@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from threading import Lock
 
 from sqlalchemy import delete
 
@@ -207,6 +208,46 @@ def _run_asr(job_id: str) -> None:
 
 
 def _run_clean(job_id: str) -> None:
+    event_lock = Lock()
+
+    def record_clean_event(event: str, payload: dict | None = None) -> None:
+        with event_lock:
+            with session_scope() as event_session:
+                task_job = event_session.get(ProcessingJob, job_id)
+                if not task_job:
+                    return
+                metadata = dict(task_job.metadata_json or {})
+                diagnostics = dict(metadata.get("clean_diagnostics") or {})
+                events = list(diagnostics.get("events") or [])
+                event_payload = payload or {}
+                events.append(
+                    {
+                        "event": event,
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "payload": event_payload,
+                    }
+                )
+                diagnostics["events"] = events[-120:]
+                diagnostics["last_event"] = event
+                if "batch_count" in event_payload:
+                    diagnostics["batch_count"] = event_payload.get("batch_count")
+                if event == "batch_plan":
+                    diagnostics["segment_count"] = event_payload.get("segment_count")
+                    diagnostics["max_workers"] = event_payload.get("max_workers")
+                    task_job.progress = max(task_job.progress or 0, 15)
+                elif event == "batch_completed":
+                    completed = int(diagnostics.get("completed_batches") or 0) + 1
+                    total = int(event_payload.get("batch_count") or diagnostics.get("batch_count") or completed)
+                    diagnostics["completed_batches"] = completed
+                    task_job.progress = min(95, 15 + int((completed / max(total, 1)) * 75))
+                elif event == "batch_failed":
+                    diagnostics["failed_batch_index"] = event_payload.get("batch_index")
+                    diagnostics["failed_error"] = event_payload.get("error")
+                elif event in {"mock_used", "all_batches_completed"}:
+                    task_job.progress = max(task_job.progress or 0, 95)
+                metadata["clean_diagnostics"] = diagnostics
+                task_job.metadata_json = metadata
+
     with session_scope() as session:
         job = session.get(ProcessingJob, job_id)
         recording = session.get(Recording, job.recording_id)
@@ -214,7 +255,7 @@ def _run_clean(job_id: str) -> None:
             {"id": seg.id, "speaker": seg.speaker, "start_time_ms": seg.start_time_ms, "end_time_ms": seg.end_time_ms, "text": seg.text}
             for seg in session.query(RawTranscriptSegment).filter_by(recording_id=recording.id).order_by(RawTranscriptSegment.start_time_ms).all()
         ]
-    cleaned = llm_client.clean_segments(raw)
+    cleaned = llm_client.clean_segments(raw, on_event=record_clean_event)
     with session_scope() as session:
         job = session.get(ProcessingJob, job_id)
         recording = session.get(Recording, job.recording_id)

@@ -692,7 +692,7 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
         </div>
         <Space wrap className="recording-status-line">
           <Tag color={recording.status === 'failed' ? 'red' : isRecordingProcessing(recording.status) ? 'blue' : 'default'}>{recordingStatusLabel(recording.status)}</Tag>
-          {isRecordingProcessing(recording.status) && <Text type="secondary">已处理 {elapsedSince(recordingTimerStart(recording), clockNow)}</Text>}
+          {isRecordingProcessing(recording.status) && <Text type="secondary">已处理 {elapsedSince(recordingTimerStart(recording), clockNow)}{recording.current_job_progress !== undefined ? ` · ${recording.current_job_progress}%` : ''}</Text>}
           {recording.status === 'failed' && failedStage && <Tag color="red">失败阶段：{failedStage}</Tag>}
         </Space>
         {recording.status === 'failed' && recording.latest_failed_job_error_message && <Text type="secondary" className="recording-error" title={recording.latest_failed_job_error_message}>{recording.latest_failed_job_error_message}</Text>}
