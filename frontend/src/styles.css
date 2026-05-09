@@ -29,6 +29,8 @@ body { background: #f4f0e8; color: #1d2433; }
 .recording-main { display: grid; gap: 6px; }
 .recording-name { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .recording-name .ant-typography { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recording-status-line { line-height: 1.4; }
+.recording-meta { font-size: 12px; }
 .middle-toolbar { display: flex; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #eee4d8; }
 .transcript-list { flex: 1; min-height: 0; padding: 12px 16px 100px; }
 .segment-card { margin-bottom: 10px; border-color: #eee3d5; }
@@ -37,8 +39,9 @@ body { background: #f4f0e8; color: #1d2433; }
 .segment-text-line { display: flex; align-items: flex-start; gap: 4px; line-height: 1.7; }
 .segment-edit-textarea { line-height: 1.7; background: #fffaf0; border-color: #e7d8c1; border-radius: 10px; padding: 8px 10px; }
 .raw-text { margin-top: 8px; color: #888; background: #f3f3f3; padding: 8px; border-radius: 8px; }
-.player { height: 72px; display: flex; align-items: center; padding: 10px 16px; border-top: 1px solid #e8dfd1; background: #fffaf0; }
+.player { height: 72px; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #e8dfd1; background: #fffaf0; }
 .player audio { width: 100%; }
+.player-hint { white-space: nowrap; font-size: 12px; }
 .qa-card { width: 100%; background: #fbfcff; }
 .qa-messages { display: grid; gap: 10px; max-height: 52vh; overflow-y: auto; padding-right: 4px; }
 .qa-user { background: #fffaf0; }

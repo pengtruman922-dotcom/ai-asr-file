@@ -89,13 +89,33 @@ function isRecordingProcessing(status?: string) {
   return Boolean(status && !['completed', 'failed', 'created'].includes(status));
 }
 
+function isRecordingPlayable(status?: string) {
+  return Boolean(status && !['created', 'uploading', 'failed'].includes(status));
+}
+
+function isRecordingReadyForQa(status?: string) {
+  return status === 'completed';
+}
+
+function defaultQaSelection(recordings: Recording[]) {
+  return recordings.filter((item) => isRecordingReadyForQa(item.status)).slice(0, 10).map((item) => item.recording_id);
+}
+
 function elapsedSince(value?: string) {
   if (!value) return '';
   const start = new Date(value).getTime();
   if (Number.isNaN(start)) return '';
   const seconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function formatFileSize(bytes?: number) {
+  if (!bytes) return '';
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
 function isSameIdSet(left: string[], right: string[]) {
@@ -266,13 +286,17 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const [queueOpen, setQueueOpen] = useState(false);
   const [columnWidths, setColumnWidths] = useState<ProjectColumnWidths>(loadProjectColumnWidths);
   const [activeResize, setActiveResize] = useState<ResizeDivider | null>(null);
+  const [, setClockTick] = useState(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
-  const defaultSelectionAppliedRef = useRef(false);
+  const selectionTouchedRef = useRef(false);
   const restoredThreadSelectionRef = useRef<string | null>(null);
   const qaSelectionWarnedRef = useRef(false);
 
   const selectedRecording = recordings.find((item) => item.recording_id === selectedId) || null;
+  const selectedRecordingId = selectedRecording?.recording_id || null;
+  const selectedRecordingPlayable = isRecordingPlayable(selectedRecording?.status);
+  const pendingQaAnswer = messages.some((item) => item.role === 'assistant' && ['queued', 'running'].includes(item.status));
 
   const loadProject = useCallback(async () => {
     const [p, r] = await Promise.all([
@@ -282,11 +306,14 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     setProject(p);
     setRecordings(r.items);
     if (!selectedId && r.items.length) setSelectedId(r.items[0].recording_id);
-    if (!defaultSelectionAppliedRef.current && !checkedIds.length && r.items.length) {
-      setCheckedIds(r.items.slice(0, 10).map((item) => item.recording_id));
-      defaultSelectionAppliedRef.current = true;
+    const completedIds = new Set(r.items.filter((item) => isRecordingReadyForQa(item.status)).map((item) => item.recording_id));
+    const defaultIds = defaultQaSelection(r.items);
+    if (!selectionTouchedRef.current) {
+      setCheckedIds((prev) => isSameIdSet(prev, defaultIds) ? prev : defaultIds);
+    } else {
+      setCheckedIds((prev) => prev.filter((id) => completedIds.has(id)).slice(0, 10));
     }
-  }, [projectId, selectedId, checkedIds.length]);
+  }, [projectId, selectedId]);
 
   const loadSelected = useCallback(async () => {
     if (!selectedId) return;
@@ -311,7 +338,10 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     setMessages(nextMessages);
     if (restoredThreadSelectionRef.current !== currentThreadId) {
       const lastSelection = [...nextMessages].reverse().find((item) => item.selected_recording_ids?.length)?.selected_recording_ids || [];
-      if (lastSelection.length) setCheckedIds(lastSelection.slice(0, 10));
+      if (lastSelection.length) {
+        selectionTouchedRef.current = true;
+        setCheckedIds(lastSelection.slice(0, 10));
+      }
       restoredThreadSelectionRef.current = currentThreadId;
     }
   }, [currentThreadId]);
@@ -331,6 +361,32 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     }, 3000);
     return () => window.clearInterval(timer);
   }, [recordings, messages, loadProject, loadSelected, loadThread]);
+
+  useEffect(() => {
+    const hasRunningRecording = recordings.some((item) => isRecordingProcessing(item.status));
+    const hasRunningMessage = messages.some((item) => ['queued', 'running'].includes(item.status));
+    if (!hasRunningRecording && !hasRunningMessage) return;
+    const timer = window.setInterval(() => setClockTick((tick) => tick + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [recordings, messages]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+    if (!selectedRecordingId || !selectedRecordingPlayable) return;
+    let cancelled = false;
+    api<{ url: string }>(`/api/recordings/${selectedRecordingId}/play-url`, { method: 'POST' })
+      .then((data) => {
+        if (cancelled || !audioRef.current) return;
+        audioRef.current.src = data.url;
+        audioRef.current.load();
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [selectedRecordingId, selectedRecordingPlayable]);
 
   useEffect(() => {
     const normalizeToContainer = () => {
@@ -418,7 +474,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     const data = await api<QAThread>(`/api/projects/${projectId}/qa-threads`, { method: 'POST', body: JSON.stringify({}) });
     setCurrentThreadId(data.thread_id);
     restoredThreadSelectionRef.current = data.thread_id;
-    setCheckedIds(recordings.slice(0, 10).map((item) => item.recording_id));
+    selectionTouchedRef.current = false;
+    setCheckedIds(defaultQaSelection(recordings));
     setMessages([]);
     void loadThreads();
   };
@@ -426,14 +483,18 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const ask = async () => {
     const question = qaQuestion.trim();
     if (!question) return message.warning('请输入问题');
-    if (!checkedIds.length) return message.warning('请先勾选录音');
+    if (pendingQaAnswer) return message.warning('AI 正在回答，完成后可继续提问');
     if (qaSubmitting) return;
-    const defaultFirstTen = recordings.slice(0, 10).map((item) => item.recording_id);
-    const isUsingDefaultFirstTen = recordings.length > 10 && isSameIdSet(checkedIds, defaultFirstTen);
+    const readyIds = new Set(recordings.filter((item) => isRecordingReadyForQa(item.status)).map((item) => item.recording_id));
+    const qaRecordingIds = checkedIds.filter((id) => readyIds.has(id)).slice(0, 10);
+    if (!qaRecordingIds.length) return message.warning('请先勾选已处理完成的录音');
+    const completedCount = readyIds.size;
+    const defaultFirstTen = defaultQaSelection(recordings);
+    const isUsingDefaultFirstTen = completedCount > 10 && isSameIdSet(qaRecordingIds, defaultFirstTen);
     if (!qaSelectionWarnedRef.current && isUsingDefaultFirstTen) {
       Modal.confirm({
         title: '确认参考文件范围',
-        content: `当前项目共有 ${recordings.length} 份录音，本次仅使用默认勾选的前 10 份作为参考材料。为了提高回答准确性，建议你根据问题精准勾选相关录音。是否继续发送？`,
+        content: `当前项目共有 ${completedCount} 份已完成录音，本次仅使用默认勾选的前 10 份作为参考材料。为了提高回答准确性，建议你根据问题精准勾选相关录音。是否继续发送？`,
         okText: '继续发送',
         cancelText: '我去调整',
         onOk: () => { qaSelectionWarnedRef.current = true; void ask(); },
@@ -450,12 +511,12 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     setQaQuestion('');
     setMessages((prev) => [
       ...prev,
-      { message_id: `tmp_user_${Date.now()}`, thread_id: threadId!, role: 'user', content: question, selected_recording_ids: checkedIds, sources: [], status: 'ready', created_at: now },
-      { message_id: `tmp_ai_${Date.now()}`, thread_id: threadId!, role: 'assistant', content: '', selected_recording_ids: checkedIds, sources: [], status: 'queued', created_at: now },
+      { message_id: `tmp_user_${Date.now()}`, thread_id: threadId!, role: 'user', content: question, selected_recording_ids: qaRecordingIds, sources: [], status: 'ready', created_at: now },
+      { message_id: `tmp_ai_${Date.now()}`, thread_id: threadId!, role: 'assistant', content: '', selected_recording_ids: qaRecordingIds, sources: [], status: 'queued', created_at: now },
     ]);
     setQaSubmitting(true);
     try {
-      await api(`/api/qa-threads/${threadId}/messages`, { method: 'POST', body: JSON.stringify({ recording_ids: checkedIds, question }) });
+      await api(`/api/qa-threads/${threadId}/messages`, { method: 'POST', body: JSON.stringify({ recording_ids: qaRecordingIds, question }) });
       void loadThreads();
       void loadThread();
     } catch (error) {
@@ -483,9 +544,15 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   };
 
   const toggleRecordingCheck = (id: string, checked: boolean) => {
+    selectionTouchedRef.current = true;
     setCheckedIds((prev) => {
       if (!checked) return prev.filter((item) => item !== id);
       if (prev.includes(id)) return prev;
+      const recording = recordings.find((item) => item.recording_id === id);
+      if (!isRecordingReadyForQa(recording?.status)) {
+        message.warning('只有处理完成的录音可以用于问答');
+        return prev;
+      }
       if (prev.length >= 10) {
         message.warning('最多选择 10 份录音用于问答');
         return prev;
@@ -513,6 +580,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
               recording={rec}
               active={rec.recording_id === selectedId}
               checked={checkedIds.includes(rec.recording_id)}
+              checkDisabled={!isRecordingReadyForQa(rec.status)}
               onSelect={() => setSelectedId(rec.recording_id)}
               onCheck={(checked) => toggleRecordingCheck(rec.recording_id, checked)}
               onRename={(name) => renameRecording(rec.recording_id, name)}
@@ -524,19 +592,19 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
         <ColumnResizeHandle side="left" active={activeResize === 'left'} onPointerDown={(event) => startColumnResize('left', event)} onDoubleClick={resetColumnWidths} />
         <main className="middle-panel">
           <div className="middle-toolbar">
-            <div><Text strong>{selectedRecording?.file_name || '请选择录音'}</Text><br /><Text type="secondary">状态：{recordingStatusLabel(selectedRecording?.status || '')}{isRecordingProcessing(selectedRecording?.status) && ` · 已耗时 ${elapsedSince(selectedRecording?.updated_at || selectedRecording?.created_at)}`}</Text></div>
+            <div><Text strong>{selectedRecording?.file_name || '请选择录音'}</Text><br /><Text type="secondary">状态：{recordingStatusLabel(selectedRecording?.status || '')}{isRecordingProcessing(selectedRecording?.status) && ` · 已处理 ${elapsedSince(selectedRecording?.updated_at || selectedRecording?.created_at)}`}</Text></div>
             <Space><Button onClick={() => setShowRaw((v) => !v)}>{showRaw ? '隐藏原始稿' : '显示原始稿'}</Button><Button icon={<DownloadOutlined />} onClick={() => exportMd('transcript')}>导出清洁稿</Button></Space>
           </div>
           <div className="transcript-list panel-scroll">
             {segments.map((seg) => <SegmentEditor key={seg.segment_id} segment={seg} showRaw={showRaw} onJump={jumpTo} onSave={saveSegment} />)}
           </div>
-          <div className="player"><audio ref={audioRef} controls /></div>
+          <div className="player"><audio ref={audioRef} controls /><Text type="secondary" className="player-hint">{selectedRecording ? selectedRecordingPlayable ? '原始音频可播放' : selectedRecording.status === 'uploading' ? '上传完成后可播放' : '暂无可播放音频' : '请选择录音'}</Text></div>
         </main>
         <ColumnResizeHandle side="right" active={activeResize === 'right'} onPointerDown={(event) => startColumnResize('right', event)} onDoubleClick={resetColumnWidths} />
         <aside className="right-panel panel-scroll">
           <Tabs defaultActiveKey="summary" items={[
             { key: 'summary', label: '纪要', children: <SummaryView summary={summary} stale={selectedRecording?.summary_stale} onExport={() => exportMd('summary')} onRegenerate={regenerateSummary} /> },
-            { key: 'qa', label: '问答', children: <QAView checked={checkedIds} recordings={recordings} threads={threads} currentThreadId={currentThreadId} setCurrentThreadId={setCurrentThreadId} messages={messages} question={qaQuestion} setQuestion={setQaQuestion} onAsk={ask} onNewThread={createThread} submitting={qaSubmitting} /> }
+            { key: 'qa', label: '问答', children: <QAView checked={checkedIds} recordings={recordings} threads={threads} currentThreadId={currentThreadId} setCurrentThreadId={setCurrentThreadId} messages={messages} question={qaQuestion} setQuestion={setQaQuestion} onAsk={ask} onNewThread={createThread} submitting={qaSubmitting} waitingForAnswer={pendingQaAnswer} /> }
           ]} />
         </aside>
       </div>
@@ -558,32 +626,50 @@ function ColumnResizeHandle({ side, active, onPointerDown, onDoubleClick }: { si
   />;
 }
 
-function RecordingListItem({ recording, active, checked, onSelect, onCheck, onRename, onDelete }: { recording: Recording; active: boolean; checked: boolean; onSelect: () => void; onCheck: (checked: boolean) => void; onRename: (name: string) => void; onDelete: () => void }) {
+function RecordingListItem({ recording, active, checked, checkDisabled, onSelect, onCheck, onRename, onDelete }: { recording: Recording; active: boolean; checked: boolean; checkDisabled: boolean; onSelect: () => void; onCheck: (checked: boolean) => void; onRename: (name: string) => void; onDelete: () => void }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(recording.file_name);
-  useEffect(() => setName(recording.file_name), [recording.file_name]);
+  const skipBlurSaveRef = useRef(false);
+  const submittedNameRef = useRef('');
+  useEffect(() => {
+    setName(recording.file_name);
+    submittedNameRef.current = '';
+  }, [recording.file_name]);
+  const mediaMeta = [`音频时长 ${formatDuration(recording.duration_seconds)}`, formatFileSize(recording.file_size_bytes)].filter(Boolean).join(' · ');
   const save = () => {
+    if (skipBlurSaveRef.current) {
+      skipBlurSaveRef.current = false;
+      return;
+    }
     const next = name.trim();
     if (!next || next === recording.file_name) {
       setEditing(false);
       setName(recording.file_name);
       return;
     }
+    if (submittedNameRef.current === next) return;
+    submittedNameRef.current = next;
     setEditing(false);
     onRename(next);
   };
+  const cancelEdit = () => {
+    skipBlurSaveRef.current = true;
+    setEditing(false);
+    setName(recording.file_name);
+    window.setTimeout(() => { skipBlurSaveRef.current = false; }, 0);
+  };
   return <List.Item className={active ? 'recording active' : 'recording'} onClick={onSelect}>
     <div className="recording-row">
-      <Checkbox checked={checked} onClick={(e) => e.stopPropagation()} onChange={(e) => onCheck(e.target.checked)} />
+      <Checkbox checked={checked} disabled={checkDisabled} onClick={(e) => e.stopPropagation()} onChange={(e) => onCheck(e.target.checked)} />
       <div className="recording-main">
         <div className="recording-name" onClick={(e) => e.stopPropagation()}>
-          {editing ? <Input size="small" value={name} autoFocus onChange={(e) => setName(e.target.value)} onPressEnter={save} onKeyDown={(e) => { if (e.key === 'Escape') { setEditing(false); setName(recording.file_name); } }} /> : <><Text strong>{recording.file_name}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(true)} /></>}
+          {editing ? <Input size="small" value={name} autoFocus onFocus={(e) => e.target.select()} onBlur={save} onChange={(e) => setName(e.target.value)} onPressEnter={save} onKeyDown={(e) => { if (e.key === 'Escape') cancelEdit(); }} /> : <><Text strong>{recording.file_name}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(true)} /></>}
         </div>
-        <Space wrap>
+        <Space wrap className="recording-status-line">
           <Tag color={recording.status === 'failed' ? 'red' : isRecordingProcessing(recording.status) ? 'blue' : 'default'}>{recordingStatusLabel(recording.status)}</Tag>
-          {isRecordingProcessing(recording.status) && <Text type="secondary">{elapsedSince(recording.updated_at || recording.created_at)}</Text>}
-          <Text type="secondary">{formatDuration(recording.duration_seconds)}</Text>
+          {isRecordingProcessing(recording.status) && <Text type="secondary">已处理 {elapsedSince(recording.updated_at || recording.created_at)}</Text>}
         </Space>
+        <Text type="secondary" className="recording-meta">{mediaMeta}</Text>
       </div>
       <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={(e) => { e.stopPropagation(); void onDelete(); }} />
     </div>
@@ -650,8 +736,9 @@ function MarkdownLite({ markdown }: { markdown: string }) {
   })}</div>;
 }
 
-function QAView({ checked, recordings, threads, currentThreadId, setCurrentThreadId, messages, question, setQuestion, onAsk, onNewThread, submitting }: { checked: string[]; recordings: Recording[]; threads: QAThread[]; currentThreadId: string | null; setCurrentThreadId: (id: string) => void; messages: QAMessage[]; question: string; setQuestion: (v: string) => void; onAsk: () => void; onNewThread: () => void; submitting: boolean }) {
+function QAView({ checked, recordings, threads, currentThreadId, setCurrentThreadId, messages, question, setQuestion, onAsk, onNewThread, submitting, waitingForAnswer }: { checked: string[]; recordings: Recording[]; threads: QAThread[]; currentThreadId: string | null; setCurrentThreadId: (id: string) => void; messages: QAMessage[]; question: string; setQuestion: (v: string) => void; onAsk: () => void; onNewThread: () => void; submitting: boolean; waitingForAnswer: boolean }) {
   const selectedNames = recordings.filter((r) => checked.includes(r.recording_id)).map((r) => r.file_name);
+  const readyCount = recordings.filter((r) => isRecordingReadyForQa(r.status)).length;
   return <Space direction="vertical" style={{ width: '100%' }}>
     <Space.Compact style={{ width: '100%' }}>
       <Button onClick={onNewThread}>新建对话</Button>
@@ -665,7 +752,7 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
       />
     </Space.Compact>
     <Tag color="blue">当前勾选：{checked.length} 份</Tag>
-    <Paragraph type="secondary">{selectedNames.length ? selectedNames.join(' / ') : '请在左侧勾选参考文件'}</Paragraph>
+    <Paragraph type="secondary">{selectedNames.length ? selectedNames.join(' / ') : readyCount ? '请在左侧勾选已处理完成的参考文件' : '暂无处理完成的录音可用于问答'}</Paragraph>
     <div className="qa-messages">
       {messages.map((item) => <Card key={item.message_id} size="small" className={item.role === 'user' ? 'qa-user' : 'qa-assistant'}>
         <Text strong>{item.role === 'user' ? '用户' : 'AI'}</Text>
@@ -674,8 +761,9 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
         {(item.sources || []).slice(0, 3).map((s, idx) => <Paragraph type="secondary" key={idx}>来源：{s.file_name} {formatMs(s.start_time_ms)} - {s.quote}</Paragraph>)}
       </Card>)}
     </div>
-    <Input.TextArea rows={3} placeholder="输入问题" value={question} onChange={(e) => setQuestion(e.target.value)} onPressEnter={(e) => { if (!e.shiftKey) { e.preventDefault(); onAsk(); } }} />
-    <Button type="primary" onClick={onAsk} loading={submitting}>发送</Button>
+    {waitingForAnswer && <Paragraph type="secondary">AI 正在回答，完成后可继续提问。</Paragraph>}
+    <Input.TextArea rows={3} placeholder="输入问题" value={question} disabled={waitingForAnswer} onChange={(e) => setQuestion(e.target.value)} onPressEnter={(e) => { if (!e.shiftKey) { e.preventDefault(); onAsk(); } }} />
+    <Button type="primary" onClick={onAsk} loading={submitting} disabled={waitingForAnswer || !checked.length}>发送</Button>
   </Space>;
 }
 
@@ -795,6 +883,7 @@ function readAudioDuration(file: File) {
 
 function QueueModal({ open, projectId, onClose, onRefresh }: { open: boolean; projectId: string; onClose: () => void; onRefresh: () => void }) {
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [, setClockTick] = useState(0);
   const load = useCallback(async () => {
     if (!open) return;
     const data = await api<{ items: Job[] }>(`/api/projects/${projectId}/jobs?page_size=50`);
@@ -806,6 +895,11 @@ function QueueModal({ open, projectId, onClose, onRefresh }: { open: boolean; pr
     const timer = window.setInterval(() => { void load(); onRefresh(); }, 3000);
     return () => window.clearInterval(timer);
   }, [open, load, onRefresh]);
+  useEffect(() => {
+    if (!open || !jobs.some((job) => ['queued', 'running'].includes(job.status))) return;
+    const timer = window.setInterval(() => setClockTick((tick) => tick + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [open, jobs]);
   const retry = async (job: Job) => { await api(`/api/jobs/${job.job_id}/retry`, { method: 'POST' }); message.success('已重试'); void load(); onRefresh(); };
   return <Modal title="处理队列" open={open} onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={900}><Table rowKey="job_id" dataSource={jobs} pagination={false} columns={[
     { title: '任务', dataIndex: 'job_type', render: (value: string) => jobTypeLabel(value) },

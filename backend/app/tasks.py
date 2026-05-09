@@ -64,6 +64,12 @@ def run_job(job_id: str) -> None:
             recording.status = "cleaning"
         elif recording and job.job_type == "summary_generation":
             recording.status = "summary_generating"
+        elif job.job_type == "qa_answer":
+            message_id = (job.metadata_json or {}).get("assistant_message_id")
+            if message_id:
+                message = session.get(QAMessage, message_id)
+                if message:
+                    message.status = "running"
 
     try:
         if job_type == "asr_transcription":
@@ -269,7 +275,7 @@ def _run_qa(job_id: str) -> None:
         total_chars = 0
         for rec in recordings:
             segments = [
-                {"id": seg.id, "speaker": seg.speaker, "start_time_ms": seg.start_time_ms, "end_time_ms": seg.end_time_ms, "text": seg.text}
+                {"speaker": seg.speaker, "start_time_ms": seg.start_time_ms, "end_time_ms": seg.end_time_ms, "text": seg.text}
                 for seg in session.query(CleanTranscriptSegment).filter_by(recording_id=rec.id).order_by(CleanTranscriptSegment.start_time_ms).all()
             ]
             total_chars += sum(len(seg["text"]) for seg in segments)

@@ -431,7 +431,6 @@ class LLMClient:
                             {
                                 "recording_id": material["recording_id"],
                                 "file_name": material["file_name"],
-                                "segment_id": seg["id"],
                                 "start_time_ms": seg["start_time_ms"],
                                 "end_time_ms": seg["end_time_ms"],
                                 "quote": seg["text"],
@@ -450,18 +449,17 @@ class LLMClient:
             }
         if not api_key:
             raise RuntimeError("LLM_API_KEY_MISSING: 请先在系统设置中配置问答模型 API Key。")
+        prompt_materials = [{"file_name": item.get("file_name", ""), "segments": item.get("segments", [])} for item in materials]
         prompt = json.dumps(
             {
                 "question": question,
-                "materials": materials,
+                "materials": prompt_materials,
                 "recent_history": history or [],
                 "output_schema": {
                     "answer_markdown": "Markdown 回答",
                     "sources": [
                         {
-                            "recording_id": "录音 id",
                             "file_name": "文件名",
-                            "segment_id": "段落 id",
                             "start_time_ms": 0,
                             "end_time_ms": 0,
                             "quote": "可引用原文",
@@ -476,13 +474,44 @@ class LLMClient:
             config.get("url", self.settings.llm_qa_base_url),
             api_key,
             config.get("model", self.settings.llm_qa_model),
-            "你是咨询顾问的项目资料分析助手。必须严格基于给定访谈材料回答，优先给出可用于报告或需求分析的结论，并附来源引用。只返回 JSON。",
+            "你是咨询顾问的项目资料分析助手。优先参考给定访谈材料回答，并给出适合需求分析、方案编写或报告引用的结论；如果材料中没有直接相关内容，可以基于通用咨询经验回答，但要明确说明这是通用建议或推断。不要输出任何内部ID、段落ID或字段名。只返回 JSON。",
             prompt,
         )
         data = self._loads_json(content)
         if not isinstance(data, dict):
             raise RuntimeError("LLM_QA_INVALID_JSON: 问答模型未返回 JSON 对象。")
+        return self._sanitize_qa_output(data)
+
+    def _sanitize_qa_output(self, data: dict) -> dict:
+        for key in ("answer", "answer_markdown"):
+            if isinstance(data.get(key), str):
+                data[key] = self._strip_internal_ids(data[key])
+        data["sources"] = self._sanitize_sources(data.get("sources") or [])
+        for point in data.get("key_points") or []:
+            if isinstance(point, dict):
+                if isinstance(point.get("detail"), str):
+                    point["detail"] = self._strip_internal_ids(point["detail"])
+                point["sources"] = self._sanitize_sources(point.get("sources") or [])
         return data
+
+    def _sanitize_sources(self, sources: list) -> list:
+        cleaned = []
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            cleaned.append(
+                {
+                    "recording_id": source.get("recording_id", ""),
+                    "file_name": source.get("file_name", ""),
+                    "start_time_ms": source.get("start_time_ms", 0),
+                    "end_time_ms": source.get("end_time_ms", 0),
+                    "quote": self._strip_internal_ids(str(source.get("quote", ""))),
+                }
+            )
+        return cleaned
+
+    def _strip_internal_ids(self, text: str) -> str:
+        return re.sub(r"[\s\(（\[]*seg_[0-9A-Za-z_-]+[\)）\]]*", "", text)
 
     def _chat_json(self, base_url: str, api_key: str, model: str, system: str, user: str) -> str:
         try:

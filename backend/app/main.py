@@ -514,6 +514,13 @@ async def create_qa_message(thread_id: str, payload: dict, db: Session = Depends
     thread = db.get(QAThread, thread_id)
     if not thread:
         return fail("QA_THREAD_NOT_FOUND", "对话不存在", status_code=404)
+    pending = (
+        db.query(QAMessage)
+        .filter(QAMessage.thread_id == thread.id, QAMessage.role == "assistant", QAMessage.status.in_(["queued", "running"]))
+        .first()
+    )
+    if pending:
+        return fail("QA_IN_PROGRESS", "当前对话正在生成回答，请等待完成后再继续提问")
     recording_ids = payload.get("recording_ids") or []
     if len(recording_ids) > settings.max_qa_recordings:
         return fail("VALIDATION_ERROR", "最多选择 10 份录音")
@@ -522,9 +529,12 @@ async def create_qa_message(thread_id: str, payload: dict, db: Session = Depends
     question = (payload.get("question") or "").strip()
     if not question:
         return fail("VALIDATION_ERROR", "请输入问题")
-    valid_count = db.query(Recording).filter(Recording.project_id == thread.project_id, Recording.id.in_(recording_ids)).count()
-    if valid_count != len(recording_ids):
+    selected_recordings = db.query(Recording).filter(Recording.project_id == thread.project_id, Recording.id.in_(recording_ids)).all()
+    if len(selected_recordings) != len(recording_ids):
         return fail("VALIDATION_ERROR", "包含不属于当前项目的录音")
+    not_ready = [recording.file_name for recording in selected_recordings if recording.status != "completed"]
+    if not_ready:
+        return fail("QA_RECORDING_NOT_READY", f"以下录音尚未处理完成，不能用于问答：{', '.join(not_ready[:3])}")
     user_msg = QAMessage(id=new_id("qamsg"), thread_id=thread.id, project_id=thread.project_id, role="user", content=question, selected_recording_ids=recording_ids, status="ready")
     assistant_msg = QAMessage(id=new_id("qamsg"), thread_id=thread.id, project_id=thread.project_id, role="assistant", content="", selected_recording_ids=recording_ids, status="queued")
     db.add(user_msg)
