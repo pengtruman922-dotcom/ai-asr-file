@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     asr_poll_interval_seconds: int = 10
     asr_poll_timeout_seconds: int = 14400
     asr_diarization_enabled: bool = True
-    asr_speaker_count: int = 2
+    asr_speaker_count: int = 0
 
     llm_mock_enabled: bool = True
     llm_clean_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
