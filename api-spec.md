@@ -159,7 +159,6 @@ page_size: number，默认 20，最大 100
 ```text
 created
 uploading
-uploaded
 queued
 asr_processing
 asr_completed
@@ -168,7 +167,6 @@ cleaning_completed
 summary_generating
 completed
 failed
-canceled
 ```
 
 ### 5.2 Job Type
@@ -434,8 +432,8 @@ POST /api/projects/{project_id}/recordings/upload-session
 用途：
 
 - 校验文件格式和大小。
-- 创建 `recordings` 草稿记录。
-- 生成 Railway Storage Bucket 预签名上传 URL。
+- 创建 `recordings` 记录，初始状态为 `uploading`，使文件能立即出现在项目列表。
+- 返回对象 key；可返回 Railway Storage Bucket 预签名上传 URL，但当前 MVP 前端默认继续调用后端代理上传接口。
 
 请求：
 
@@ -474,7 +472,43 @@ POST /api/projects/{project_id}/recordings/upload-session
 }
 ```
 
-### 8.2 完成上传并创建处理任务
+### 8.2 上传文件内容并创建处理任务（当前 MVP 使用）
+
+```http
+POST /api/recordings/{recording_id}/upload-content
+Content-Type: multipart/form-data
+```
+
+用途：
+
+- 前端通过后端代理上传实际音频文件，避免浏览器直连 Bucket 的 CORS/区域配置问题。
+- 后端将文件写入当前录音记录保存的存储快照。
+- 写入成功后将录音状态改为 `queued`，创建 `asr_transcription` 任务并入队。
+- 写入失败时录音状态改为 `failed`，前端列表显示“处理失败”。
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| file | File | 是 | 实际音频文件 |
+
+成功响应：
+
+```json
+{
+  "success": true,
+  "data": {
+    "recording_id": "rec_001",
+    "status": "queued",
+    "job_id": "job_001"
+  }
+}
+```
+
+前端交互要求：浏览器上传进度达到 100% 后可关闭上传弹窗；文件列表依靠 `upload-session` 创建的记录展示“上传中/排队中/识别中”等状态，并通过项目页轮询刷新。
+
+
+### 8.3 可选：完成直传并创建处理任务
 
 ```http
 POST /api/recordings/{recording_id}/upload-complete
@@ -505,11 +539,11 @@ POST /api/recordings/{recording_id}/upload-complete
 
 处理动作：
 
-1. 标记录音 `uploaded`。
+1. 标记录音为 `queued`。
 2. 创建 `asr_transcription` 任务。
 3. 写入任务队列。
 
-### 8.3 获取录音列表
+### 8.4 获取录音列表
 
 ```http
 GET /api/projects/{project_id}/recordings?keyword=财务&page=1&page_size=50
@@ -537,7 +571,7 @@ GET /api/projects/{project_id}/recordings?keyword=财务&page=1&page_size=50
 }
 ```
 
-### 8.4 获取录音详情
+### 8.5 获取录音详情
 
 ```http
 GET /api/recordings/{recording_id}
@@ -560,7 +594,7 @@ GET /api/recordings/{recording_id}
 }
 ```
 
-### 8.5 获取音频播放 URL
+### 8.6 获取音频播放 URL
 
 ```http
 POST /api/recordings/{recording_id}/play-url
@@ -578,7 +612,27 @@ POST /api/recordings/{recording_id}/play-url
 }
 ```
 
-### 8.6 删除录音
+
+### 8.7 修改录音展示名称
+
+```http
+PATCH /api/recordings/{recording_id}
+Content-Type: application/json
+```
+
+用途：只修改前端展示的 `file_name`，不修改对象存储 `object_key`。
+
+请求：
+
+```json
+{
+  "file_name": "客户A-财务负责人-补充访谈.m4a"
+}
+```
+
+响应：返回更新后的录音详情。
+
+### 8.8 删除录音
 
 ```http
 DELETE /api/recordings/{recording_id}
@@ -1538,9 +1592,11 @@ PATCH  /api/projects/{project_id}
 DELETE /api/projects/{project_id}
 
 POST   /api/projects/{project_id}/recordings/upload-session
+POST   /api/recordings/{recording_id}/upload-content
 POST   /api/recordings/{recording_id}/upload-complete
 GET    /api/projects/{project_id}/recordings
 GET    /api/recordings/{recording_id}
+PATCH  /api/recordings/{recording_id}
 POST   /api/recordings/{recording_id}/play-url
 DELETE /api/recordings/{recording_id}
 
@@ -1550,8 +1606,10 @@ PATCH  /api/transcript-segments/{segment_id}
 GET    /api/recordings/{recording_id}/summary
 POST   /api/recordings/{recording_id}/summary/regenerate
 
-POST   /api/projects/{project_id}/qa
-GET    /api/qa/{qa_session_id}
+POST   /api/projects/{project_id}/qa-threads
+GET    /api/projects/{project_id}/qa-threads
+GET    /api/qa-threads/{thread_id}
+POST   /api/qa-threads/{thread_id}/messages
 
 GET    /api/jobs/recent
 GET    /api/projects/{project_id}/jobs
@@ -1955,3 +2013,11 @@ LLM_MOCK_ENABLED=false
 ```
 
 Web 与 Worker 必须连接同一个 PostgreSQL、Redis 和 Bucket 配置，否则会出现任务入队成功但 Worker 无法读取文件或配置的问题。
+
+
+## 2026-05-09 项目页交互相关接口补充
+
+- `PATCH /api/transcript-segments/{segment_id}` 支持请求字段 `replace_same_speaker: true`，用于用户修改发言人后批量替换当前录音中相同的旧发言人名称。
+- `GET /api/projects/{project_id}/jobs` 返回的 `job_type`、`status` 在前端统一映射为中文；队列弹窗每 3 秒刷新一次，并展示 `progress` 与基于 `created_at/started_at` 的已耗时。
+- `POST /api/qa-threads/{thread_id}/messages` 仍然只接收本轮勾选的 `recording_ids`；连续对话的“沿用上轮勾选”和“默认前 10 份”由前端状态管理实现。
+- 录音状态在前端映射为：`created=草稿`、`uploading=上传中`、`queued=排队中`、`asr_processing=识别中`、`cleaning=清洁稿生成中`、`summary_generating=纪要生成中`、`completed=处理完成`、`failed=处理失败`。

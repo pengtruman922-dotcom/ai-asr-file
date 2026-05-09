@@ -265,6 +265,42 @@ async def upload_complete(recording_id: str, payload: dict, db: Session = Depend
     return ok({"recording_id": recording.id, "status": "queued", "job_id": job.id})
 
 
+@app.post("/api/recordings/{recording_id}/upload-content")
+def upload_recording_content(recording_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    recording = db.get(Recording, recording_id)
+    if not recording:
+        return fail("RECORDING_NOT_FOUND", "录音不存在", status_code=404)
+
+    file.file.seek(0, 2)
+    size = file.file.tell()
+    file.file.seek(0)
+    basic_config = get_basic_config(db)
+    max_size_mb = basic_config.get("max_upload_size_mb", settings.max_upload_size_mb)
+    if size > max_size_mb * 1024 * 1024:
+        recording.status = "failed"
+        db.commit()
+        return fail("FILE_TOO_LARGE", f"文件超过 {max_size_mb}M")
+
+    try:
+        storage.upload_fileobj(recording.object_key, file.file, file.content_type or recording.mime_type, storage.recording_config(recording))
+    except RuntimeError as exc:
+        recording.status = "failed"
+        db.commit()
+        return fail("STORAGE_CONFIG_MISSING", str(exc))
+    except Exception as exc:
+        recording.status = "failed"
+        db.commit()
+        return fail("STORAGE_UPLOAD_FAILED", f"文件写入 Bucket 失败：{exc}")
+
+    recording.status = "queued"
+    recording.file_size_bytes = size
+    recording.mime_type = file.content_type or recording.mime_type
+    job = create_job(db, recording.project_id, recording.id, "asr_transcription")
+    db.commit()
+    enqueue_job(job.id)
+    return ok({"recording_id": recording.id, "status": "queued", "job_id": job.id})
+
+
 @app.post("/api/projects/{project_id}/recordings/upload")
 def upload_recording_proxy(
     project_id: str,
@@ -344,6 +380,19 @@ def get_recording(recording_id: str, db: Session = Depends(get_db)):
     recording = db.get(Recording, recording_id)
     if not recording:
         return fail("RECORDING_NOT_FOUND", "录音不存在", status_code=404)
+    return ok(recording_payload(recording))
+
+
+@app.patch("/api/recordings/{recording_id}")
+async def update_recording(recording_id: str, payload: dict, db: Session = Depends(get_db)):
+    recording = db.get(Recording, recording_id)
+    if not recording:
+        return fail("RECORDING_NOT_FOUND", "录音不存在", status_code=404)
+    file_name = str(payload.get("file_name") or "").strip()
+    if not file_name:
+        return fail("VALIDATION_ERROR", "文件名称不能为空")
+    recording.file_name = file_name
+    db.commit()
     return ok(recording_payload(recording))
 
 

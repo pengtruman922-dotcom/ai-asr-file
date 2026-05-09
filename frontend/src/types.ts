@@ -16,6 +16,8 @@ export type Recording = {
   file_size_bytes: number;
   template_type: string;
   summary_stale: boolean;
+  created_at?: string;
+  updated_at?: string;
 };
 
 export type TranscriptSegment = {
@@ -37,6 +39,9 @@ export type Job = {
   progress: number;
   error_code?: string;
   error_message?: string;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string;
 };
 
 export type QAItem = {

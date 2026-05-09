@@ -10,11 +10,11 @@ const { Header, Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
 
 const PROJECT_LAYOUT_STORAGE_KEY = 'ai_asr_project_layout_v1';
-const PROJECT_LAYOUT_DEFAULT = { left: 280, right: 380 };
+const PROJECT_LAYOUT_DEFAULT = { left: 280, right: 430 };
 const LEFT_PANEL_MIN = 220;
 const LEFT_PANEL_MAX = 460;
 const RIGHT_PANEL_MIN = 300;
-const RIGHT_PANEL_MAX = 620;
+const RIGHT_PANEL_MAX = 930;
 const MIDDLE_PANEL_MIN = 480;
 const RESIZE_HANDLE_TOTAL_WIDTH = 16;
 
@@ -45,20 +45,95 @@ function normalizeProjectColumnWidths(widths: ProjectColumnWidths, containerWidt
   return { left, right };
 }
 
+const RECORDING_STATUS_LABELS: Record<string, string> = {
+  created: '草稿',
+  uploading: '上传中',
+  queued: '排队中',
+  asr_processing: '识别中',
+  asr_completed: '识别完成',
+  cleaning: '清洁稿生成中',
+  cleaning_completed: '清洁稿完成',
+  summary_generating: '纪要生成中',
+  completed: '处理完成',
+  failed: '处理失败',
+};
+
+const JOB_TYPE_LABELS: Record<string, string> = {
+  asr_transcription: 'ASR 转写',
+  clean_transcript: '清洁稿生成',
+  summary_generation: '纪要生成',
+  qa_answer: '问答生成',
+  export: '导出',
+};
+
+const JOB_STATUS_LABELS: Record<string, string> = {
+  queued: '排队中',
+  running: '运行中',
+  succeeded: '已完成',
+  failed: '失败',
+};
+
+function recordingStatusLabel(status: string) {
+  return RECORDING_STATUS_LABELS[status] || status || '-';
+}
+
+function jobTypeLabel(type: string) {
+  return JOB_TYPE_LABELS[type] || type || '-';
+}
+
+function jobStatusLabel(status: string) {
+  return JOB_STATUS_LABELS[status] || status || '-';
+}
+
+function isRecordingProcessing(status?: string) {
+  return Boolean(status && !['completed', 'failed', 'created'].includes(status));
+}
+
+function elapsedSince(value?: string) {
+  if (!value) return '';
+  const start = new Date(value).getTime();
+  if (Number.isNaN(start)) return '';
+  const seconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function isSameIdSet(left: string[], right: string[]) {
+  return left.length === right.length && left.every((id) => right.includes(id));
+}
+
 function App() {
   const [token, setTokenState] = useState(getToken());
-  const [view, setView] = useState<'home' | 'project' | 'settings'>('home');
-  const [projectId, setProjectId] = useState<string | null>(null);
+  const [route, setRoute] = useState(readRoute);
+
+  useEffect(() => {
+    const onPopState = () => setRoute(readRoute());
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  const navigate = (path: string) => {
+    window.history.pushState({}, '', path);
+    setRoute(readRoute());
+  };
 
   if (!token) return <Login onLogin={(next) => { setToken(next); setTokenState(next); }} />;
 
   return (
     <Layout className="app-shell">
-      {view === 'home' && <Home onOpenProject={(id) => { setProjectId(id); setView('project'); }} onSettings={() => setView('settings')} onLogout={() => { clearToken(); setTokenState(''); }} />}
-      {view === 'project' && projectId && <ProjectPage projectId={projectId} onBack={() => setView('home')} />}
-      {view === 'settings' && <SettingsPage onBack={() => setView('home')} />}
+      {route.view === 'home' && <Home onOpenProject={(id) => navigate(`/projects/${id}`)} onSettings={() => navigate('/settings')} onLogout={() => { clearToken(); setTokenState(''); }} />}
+      {route.view === 'project' && route.projectId && <ProjectPage projectId={route.projectId} onBack={() => navigate('/')} />}
+      {route.view === 'settings' && <SettingsPage onBack={() => navigate('/')} />}
     </Layout>
   );
+}
+
+function readRoute(): { view: 'home' | 'project' | 'settings'; projectId?: string } {
+  const path = window.location.pathname;
+  const projectMatch = path.match(/^\/projects\/([^/]+)/);
+  if (projectMatch) return { view: 'project', projectId: decodeURIComponent(projectMatch[1]) };
+  if (path === '/settings') return { view: 'settings' };
+  return { view: 'home' };
 }
 
 function Login({ onLogin }: { onLogin: (token: string) => void }) {
@@ -193,6 +268,9 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const [activeResize, setActiveResize] = useState<ResizeDivider | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const defaultSelectionAppliedRef = useRef(false);
+  const restoredThreadSelectionRef = useRef<string | null>(null);
+  const qaSelectionWarnedRef = useRef(false);
 
   const selectedRecording = recordings.find((item) => item.recording_id === selectedId) || null;
 
@@ -204,7 +282,11 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     setProject(p);
     setRecordings(r.items);
     if (!selectedId && r.items.length) setSelectedId(r.items[0].recording_id);
-  }, [projectId, selectedId]);
+    if (!defaultSelectionAppliedRef.current && !checkedIds.length && r.items.length) {
+      setCheckedIds(r.items.slice(0, 10).map((item) => item.recording_id));
+      defaultSelectionAppliedRef.current = true;
+    }
+  }, [projectId, selectedId, checkedIds.length]);
 
   const loadSelected = useCallback(async () => {
     if (!selectedId) return;
@@ -225,7 +307,13 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const loadThread = useCallback(async () => {
     if (!currentThreadId) { setMessages([]); return; }
     const data = await api<QAThread>(`/api/qa-threads/${currentThreadId}`);
-    setMessages(data.messages || []);
+    const nextMessages = data.messages || [];
+    setMessages(nextMessages);
+    if (restoredThreadSelectionRef.current !== currentThreadId) {
+      const lastSelection = [...nextMessages].reverse().find((item) => item.selected_recording_ids?.length)?.selected_recording_ids || [];
+      if (lastSelection.length) setCheckedIds(lastSelection.slice(0, 10));
+      restoredThreadSelectionRef.current = currentThreadId;
+    }
   }, [currentThreadId]);
 
   useEffect(() => { void loadProject(); }, [loadProject]);
@@ -233,14 +321,14 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   useEffect(() => { void loadThreads(); }, [loadThreads]);
   useEffect(() => { void loadThread(); }, [loadThread]);
   useEffect(() => {
-    const hasRunningRecording = recordings.some((item) => !['completed', 'failed', 'created'].includes(item.status));
+    const hasRunningRecording = recordings.some((item) => isRecordingProcessing(item.status));
     const hasRunningMessage = messages.some((item) => ['queued', 'running'].includes(item.status));
     if (!hasRunningRecording && !hasRunningMessage) return;
     const timer = window.setInterval(() => {
       void loadProject();
       void loadSelected();
       void loadThread();
-    }, 5000);
+    }, 3000);
     return () => window.clearInterval(timer);
   }, [recordings, messages, loadProject, loadSelected, loadThread]);
 
@@ -329,6 +417,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const createThread = async () => {
     const data = await api<QAThread>(`/api/projects/${projectId}/qa-threads`, { method: 'POST', body: JSON.stringify({}) });
     setCurrentThreadId(data.thread_id);
+    restoredThreadSelectionRef.current = data.thread_id;
+    setCheckedIds(recordings.slice(0, 10).map((item) => item.recording_id));
     setMessages([]);
     void loadThreads();
   };
@@ -338,6 +428,18 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     if (!question) return message.warning('请输入问题');
     if (!checkedIds.length) return message.warning('请先勾选录音');
     if (qaSubmitting) return;
+    const defaultFirstTen = recordings.slice(0, 10).map((item) => item.recording_id);
+    const isUsingDefaultFirstTen = recordings.length > 10 && isSameIdSet(checkedIds, defaultFirstTen);
+    if (!qaSelectionWarnedRef.current && isUsingDefaultFirstTen) {
+      Modal.confirm({
+        title: '确认参考文件范围',
+        content: `当前项目共有 ${recordings.length} 份录音，本次仅使用默认勾选的前 10 份作为参考材料。为了提高回答准确性，建议你根据问题精准勾选相关录音。是否继续发送？`,
+        okText: '继续发送',
+        cancelText: '我去调整',
+        onOk: () => { qaSelectionWarnedRef.current = true; void ask(); },
+      });
+      return;
+    }
     let threadId = currentThreadId;
     if (!threadId) {
       const thread = await api<QAThread>(`/api/projects/${projectId}/qa-threads`, { method: 'POST', body: JSON.stringify({}) });
@@ -368,8 +470,28 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     Modal.confirm({ title: '确认硬删除录音？', content: '将同时删除录音文件、转写稿、纪要和相关任务。', okText: '确认删除', okButtonProps: { danger: true }, onOk: async () => { await api(`/api/recordings/${id}`, { method: 'DELETE' }); message.success('已删除'); setSelectedId(null); void loadProject(); } });
   };
 
+  const renameRecording = async (id: string, fileName: string) => {
+    const nextName = fileName.trim();
+    if (!nextName) return message.warning('文件名称不能为空');
+    await api(`/api/recordings/${id}`, { method: 'PATCH', body: JSON.stringify({ file_name: nextName }) });
+    message.success('文件名已保存');
+    void loadProject();
+  };
+
   const deleteProject = () => {
     Modal.confirm({ title: '确认硬删除项目？', content: '将删除项目下所有录音、文件、纪要和问答历史。', okText: '确认删除', okButtonProps: { danger: true }, onOk: async () => { await api(`/api/projects/${projectId}`, { method: 'DELETE' }); message.success('项目已删除'); onBack(); } });
+  };
+
+  const toggleRecordingCheck = (id: string, checked: boolean) => {
+    setCheckedIds((prev) => {
+      if (!checked) return prev.filter((item) => item !== id);
+      if (prev.includes(id)) return prev;
+      if (prev.length >= 10) {
+        message.warning('最多选择 10 份录音用于问答');
+        return prev;
+      }
+      return [...prev, id];
+    });
   };
 
   const exportMd = async (type: 'summary' | 'transcript') => {
@@ -387,21 +509,23 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
           <Text type="secondary">文件数量 {recordings.length}/30</Text>
           {recordings.length >= 30 && <Tag color="orange">已达到建议上限</Tag>}
           <List dataSource={recordings} locale={{ emptyText: '暂无文件' }} renderItem={(rec) => (
-            <List.Item className={rec.recording_id === selectedId ? 'recording active' : 'recording'} onClick={() => setSelectedId(rec.recording_id)}>
-              <div className="recording-row">
-                <Checkbox checked={checkedIds.includes(rec.recording_id)} onClick={(e) => e.stopPropagation()} onChange={(e) => setCheckedIds((prev) => e.target.checked ? [...prev, rec.recording_id].slice(0, 10) : prev.filter((id) => id !== rec.recording_id))} />
-                <div className="recording-main"><Text strong>{rec.file_name}</Text><Space><Tag>{rec.status}</Tag><Text type="secondary">{formatDuration(rec.duration_seconds)}</Text></Space></div>
-                <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={(e) => { e.stopPropagation(); void deleteRecording(rec.recording_id); }} />
-              </div>
-            </List.Item>
+            <RecordingListItem
+              recording={rec}
+              active={rec.recording_id === selectedId}
+              checked={checkedIds.includes(rec.recording_id)}
+              onSelect={() => setSelectedId(rec.recording_id)}
+              onCheck={(checked) => toggleRecordingCheck(rec.recording_id, checked)}
+              onRename={(name) => renameRecording(rec.recording_id, name)}
+              onDelete={() => deleteRecording(rec.recording_id)}
+            />
           )} />
           <Text type="secondary">已选 {checkedIds.length} / 最多 10 份用于问答</Text>
         </aside>
         <ColumnResizeHandle side="left" active={activeResize === 'left'} onPointerDown={(event) => startColumnResize('left', event)} onDoubleClick={resetColumnWidths} />
         <main className="middle-panel">
           <div className="middle-toolbar">
-            <div><Text strong>{selectedRecording?.file_name || '请选择录音'}</Text><br /><Text type="secondary">状态：{selectedRecording?.status || '-'}</Text></div>
-            <Space><Button onClick={() => setShowRaw((v) => !v)}>{showRaw ? '隐藏原始稿' : '显示原始稿'}</Button><Button icon={<ReloadOutlined />} onClick={regenerateSummary}>重新生成纪要</Button><Button icon={<DownloadOutlined />} onClick={() => exportMd('transcript')}>导出清洁稿</Button></Space>
+            <div><Text strong>{selectedRecording?.file_name || '请选择录音'}</Text><br /><Text type="secondary">状态：{recordingStatusLabel(selectedRecording?.status || '')}{isRecordingProcessing(selectedRecording?.status) && ` · 已耗时 ${elapsedSince(selectedRecording?.updated_at || selectedRecording?.created_at)}`}</Text></div>
+            <Space><Button onClick={() => setShowRaw((v) => !v)}>{showRaw ? '隐藏原始稿' : '显示原始稿'}</Button><Button icon={<DownloadOutlined />} onClick={() => exportMd('transcript')}>导出清洁稿</Button></Space>
           </div>
           <div className="transcript-list panel-scroll">
             {segments.map((seg) => <SegmentEditor key={seg.segment_id} segment={seg} showRaw={showRaw} onJump={jumpTo} onSave={saveSegment} />)}
@@ -411,12 +535,12 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
         <ColumnResizeHandle side="right" active={activeResize === 'right'} onPointerDown={(event) => startColumnResize('right', event)} onDoubleClick={resetColumnWidths} />
         <aside className="right-panel panel-scroll">
           <Tabs defaultActiveKey="summary" items={[
-            { key: 'summary', label: '纪要', children: <SummaryView summary={summary} stale={selectedRecording?.summary_stale} onExport={() => exportMd('summary')} /> },
+            { key: 'summary', label: '纪要', children: <SummaryView summary={summary} stale={selectedRecording?.summary_stale} onExport={() => exportMd('summary')} onRegenerate={regenerateSummary} /> },
             { key: 'qa', label: '问答', children: <QAView checked={checkedIds} recordings={recordings} threads={threads} currentThreadId={currentThreadId} setCurrentThreadId={setCurrentThreadId} messages={messages} question={qaQuestion} setQuestion={setQaQuestion} onAsk={ask} onNewThread={createThread} submitting={qaSubmitting} /> }
           ]} />
         </aside>
       </div>
-      <UploadModal open={uploadOpen} projectId={projectId} onClose={() => setUploadOpen(false)} onDone={() => { setUploadOpen(false); void loadProject(); }} />
+      <UploadModal open={uploadOpen} projectId={projectId} onClose={() => setUploadOpen(false)} onCreated={(id) => { setSelectedId(id); void loadProject(); }} onDone={() => { setUploadOpen(false); void loadProject(); }} />
       <QueueModal open={queueOpen} projectId={projectId} onClose={() => setQueueOpen(false)} onRefresh={() => { void loadProject(); void loadSelected(); }} />
     </div>
   );
@@ -432,6 +556,38 @@ function ColumnResizeHandle({ side, active, onPointerDown, onDoubleClick }: { si
     onDoubleClick={onDoubleClick}
     title="拖拽调整栏目宽度，双击恢复默认宽度"
   />;
+}
+
+function RecordingListItem({ recording, active, checked, onSelect, onCheck, onRename, onDelete }: { recording: Recording; active: boolean; checked: boolean; onSelect: () => void; onCheck: (checked: boolean) => void; onRename: (name: string) => void; onDelete: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(recording.file_name);
+  useEffect(() => setName(recording.file_name), [recording.file_name]);
+  const save = () => {
+    const next = name.trim();
+    if (!next || next === recording.file_name) {
+      setEditing(false);
+      setName(recording.file_name);
+      return;
+    }
+    setEditing(false);
+    onRename(next);
+  };
+  return <List.Item className={active ? 'recording active' : 'recording'} onClick={onSelect}>
+    <div className="recording-row">
+      <Checkbox checked={checked} onClick={(e) => e.stopPropagation()} onChange={(e) => onCheck(e.target.checked)} />
+      <div className="recording-main">
+        <div className="recording-name" onClick={(e) => e.stopPropagation()}>
+          {editing ? <Input size="small" value={name} autoFocus onChange={(e) => setName(e.target.value)} onPressEnter={save} onKeyDown={(e) => { if (e.key === 'Escape') { setEditing(false); setName(recording.file_name); } }} /> : <><Text strong>{recording.file_name}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(true)} /></>}
+        </div>
+        <Space wrap>
+          <Tag color={recording.status === 'failed' ? 'red' : isRecordingProcessing(recording.status) ? 'blue' : 'default'}>{recordingStatusLabel(recording.status)}</Tag>
+          {isRecordingProcessing(recording.status) && <Text type="secondary">{elapsedSince(recording.updated_at || recording.created_at)}</Text>}
+          <Text type="secondary">{formatDuration(recording.duration_seconds)}</Text>
+        </Space>
+      </div>
+      <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={(e) => { e.stopPropagation(); void onDelete(); }} />
+    </div>
+  </List.Item>;
 }
 
 function SegmentEditor({ segment, showRaw, onJump, onSave }: { segment: TranscriptSegment; showRaw: boolean; onJump: (ms: number) => void; onSave: (seg: TranscriptSegment, options?: { replaceSameSpeaker?: boolean }) => void }) {
@@ -465,7 +621,7 @@ function SegmentEditor({ segment, showRaw, onJump, onSave }: { segment: Transcri
           {editingSpeaker ? <Space.Compact><Input size="small" value={draft.speaker} onChange={(e) => setDraft({ ...draft, speaker: e.target.value })} onPressEnter={saveSpeaker} /><Button size="small" type="primary" onClick={saveSpeaker}>保存</Button><Button size="small" onClick={() => { setDraft(segment); setEditingSpeaker(false); }}>取消</Button></Space.Compact> : <><Text strong>{segment.speaker}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditingSpeaker(true)} /></>}
         </div>
         <div className="segment-text-line">
-          {editingText ? <Space direction="vertical" style={{ width: '100%' }}><Input.TextArea rows={3} value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} /><Space><Button size="small" type="primary" onClick={saveText}>保存正文</Button><Button size="small" onClick={() => { setDraft(segment); setEditingText(false); }}>取消</Button></Space></Space> : <><Text>{segment.text}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditingText(true)} /></>}
+          {editingText ? <Space direction="vertical" style={{ width: '100%' }}><Input.TextArea className="segment-edit-textarea" autoSize={{ minRows: 2, maxRows: 8 }} value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} /><Space><Button size="small" type="primary" onClick={saveText}>保存正文</Button><Button size="small" onClick={() => { setDraft(segment); setEditingText(false); }}>取消</Button></Space></Space> : <><Text>{segment.text}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditingText(true)} /></>}
         </div>
         {showRaw && segment.raw_text && <Paragraph className="raw-text">{segment.raw_text}</Paragraph>}
       </div>
@@ -473,10 +629,10 @@ function SegmentEditor({ segment, showRaw, onJump, onSave }: { segment: Transcri
   </Card>;
 }
 
-function SummaryView({ summary, stale, onExport }: { summary: any; stale?: boolean; onExport: () => void }) {
+function SummaryView({ summary, stale, onExport, onRegenerate }: { summary: any; stale?: boolean; onExport: () => void; onRegenerate: () => void }) {
   const markdown = summary?.content?.markdown || '';
   return <Space direction="vertical" style={{ width: '100%' }}>
-    {stale && <Tag color="orange">清洁稿已编辑，纪要可能过期</Tag>}
+    {stale && <Space><Tag color="orange">清洁稿已编辑，纪要可能过期</Tag><Button size="small" icon={<ReloadOutlined />} onClick={onRegenerate}>重新生成纪要</Button></Space>}
     <Button icon={<DownloadOutlined />} onClick={onExport}>导出纪要 Markdown</Button>
     <MarkdownLite markdown={markdown || '暂无纪要'} />
   </Space>;
@@ -513,7 +669,7 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
     <div className="qa-messages">
       {messages.map((item) => <Card key={item.message_id} size="small" className={item.role === 'user' ? 'qa-user' : 'qa-assistant'}>
         <Text strong>{item.role === 'user' ? '用户' : 'AI'}</Text>
-        {item.status === 'queued' ? <Paragraph>生成中...</Paragraph> : <MarkdownLite markdown={item.content || item.status} />}
+        {['queued', 'running'].includes(item.status) ? <Paragraph>生成中...</Paragraph> : item.status === 'failed' ? <Paragraph type="danger">生成失败，请稍后重试</Paragraph> : <MarkdownLite markdown={item.content || item.status} />}
         {item.role === 'assistant' && <Paragraph type="secondary">本轮参考材料：{item.selected_recording_ids?.length || 0} 份</Paragraph>}
         {(item.sources || []).slice(0, 3).map((s, idx) => <Paragraph type="secondary" key={idx}>来源：{s.file_name} {formatMs(s.start_time_ms)} - {s.quote}</Paragraph>)}
       </Card>)}
@@ -523,7 +679,7 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
   </Space>;
 }
 
-function UploadModal({ open, projectId, onClose, onDone }: { open: boolean; projectId: string; onClose: () => void; onDone: () => void }) {
+function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: boolean; projectId: string; onClose: () => void; onCreated: (recordingId: string) => void; onDone: () => void }) {
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
@@ -547,14 +703,29 @@ function UploadModal({ open, projectId, onClose, onDone }: { open: boolean; proj
         message.error(`文件时长超过 ${limits.max_recording_duration_hours} 小时`);
         return;
       }
+      const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      setProgress(0);
+      const session = await api<any>(`/api/projects/${projectId}/recordings/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: duration ? Math.round(duration) : 0, template_type: 'customer_interview' }) });
+      onCreated(session.recording_id);
       const form = new FormData();
       form.append('file', file);
-      form.append('duration_seconds', String(duration ? Math.round(duration) : 0));
-      form.append('template_type', 'customer_interview');
-      setProgress(0);
-      await postFormWithProgress(`/api/projects/${projectId}/recordings/upload`, form, setProgress);
+      let closedAfterClientUpload = false;
+      const closeAfterClientUpload = () => {
+        if (closedAfterClientUpload) return;
+        closedAfterClientUpload = true;
+        onDone();
+      };
+      await postFormWithProgress(`/api/recordings/${session.recording_id}/upload-content`, form, (value) => {
+        setProgress(value);
+        if (value >= 100) {
+          message.loading('文件已上传，正在保存到云存储...', 1.5);
+          closeAfterClientUpload();
+        }
+      });
       message.success('上传完成，已进入处理队列');
-      setFiles([]); setProgress(0); onDone();
+      setFiles([]);
+      setProgress(0);
+      closeAfterClientUpload();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '上传失败';
       setUploadError(errorMessage);
@@ -563,7 +734,7 @@ function UploadModal({ open, projectId, onClose, onDone }: { open: boolean; proj
       setUploading(false);
     }
   };
-  return <Modal title="上传录音" open={open} onCancel={uploading ? undefined : onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}><Upload.Dragger beforeUpload={() => false} maxCount={1} fileList={files} onChange={(info) => { setFiles(info.fileList); setUploadError(''); }} disabled={uploading}><p className="ant-upload-drag-icon"><InboxOutlined /></p><p>拖拽文件到此处，或点击选择文件</p><p>支持 mp3 / wav / m4a / aac / flac / ogg / wma，单文件最大 {limits.max_upload_size_mb}MB，时长上限 {limits.max_recording_duration_hours} 小时</p></Upload.Dragger>{progress > 0 && <Progress percent={progress} />}{uploadError && <Text type="danger">{uploadError}</Text>}</Modal>;
+  return <Modal title="上传录音" open={open} onCancel={uploading ? undefined : onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}><Upload.Dragger beforeUpload={() => false} maxCount={1} fileList={files} onChange={(info) => { setFiles(info.fileList); setUploadError(''); }} disabled={uploading}><p className="ant-upload-drag-icon"><InboxOutlined /></p><p>拖拽文件到此处，或点击选择文件</p><p>支持 mp3 / wav / m4a / aac / flac / ogg / wma，单文件最大 {limits.max_upload_size_mb}MB，时长上限 {limits.max_recording_duration_hours} 小时</p></Upload.Dragger>{progress > 0 && <Progress percent={progress} status={progress >= 100 ? 'success' : 'active'} />}{progress >= 100 && uploading && <Paragraph type="secondary">文件已上传，正在保存到云存储...</Paragraph>}{uploadError && <Text type="danger">{uploadError}</Text>}</Modal>;
 }
 
 function postFormWithProgress(url: string, body: FormData, onProgress: (value: number) => void) {
@@ -630,8 +801,19 @@ function QueueModal({ open, projectId, onClose, onRefresh }: { open: boolean; pr
     setJobs(data.items);
   }, [open, projectId]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setInterval(() => { void load(); onRefresh(); }, 3000);
+    return () => window.clearInterval(timer);
+  }, [open, load, onRefresh]);
   const retry = async (job: Job) => { await api(`/api/jobs/${job.job_id}/retry`, { method: 'POST' }); message.success('已重试'); void load(); onRefresh(); };
-  return <Modal title="处理队列" open={open} onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={900}><Table rowKey="job_id" dataSource={jobs} pagination={false} columns={[{ title: '任务', dataIndex: 'job_type' }, { title: '状态', dataIndex: 'status' }, { title: '错误', dataIndex: 'error_message' }, { title: '操作', render: (_, job) => job.status === 'failed' ? <Button onClick={() => retry(job)}>重试</Button> : null }]} /></Modal>;
+  return <Modal title="处理队列" open={open} onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={900}><Table rowKey="job_id" dataSource={jobs} pagination={false} columns={[
+    { title: '任务', dataIndex: 'job_type', render: (value: string) => jobTypeLabel(value) },
+    { title: '状态', dataIndex: 'status', render: (value: string, job: Job) => <Space><Tag color={value === 'failed' ? 'red' : ['queued', 'running'].includes(value) ? 'blue' : 'green'}>{jobStatusLabel(value)}</Tag>{['queued', 'running'].includes(value) && <Text type="secondary">{elapsedSince(job.started_at || job.created_at)}</Text>}</Space> },
+    { title: '进度', dataIndex: 'progress', width: 150, render: (value: number) => <Progress percent={value || 0} size="small" /> },
+    { title: '错误', dataIndex: 'error_message' },
+    { title: '操作', render: (_, job) => job.status === 'failed' ? <Button onClick={() => retry(job)}>重试</Button> : null }
+  ]} /></Modal>;
 }
 
 type AiNodeKey = 'asr' | 'clean' | 'summary' | 'qa';
