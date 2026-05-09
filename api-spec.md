@@ -2085,3 +2085,20 @@ ASR 诊断事件包括：`download_url_created`、`submit_start`、`submit_compl
 ```
 
 前端优先使用 `content + filename` 生成 Blob 下载，避免浏览器将 Markdown 预签名 URL 当作文本预览页打开；`download_url` 保留给后续兼容和人工排查。
+
+
+## 2026-05-09 失败任务重试字段补充
+
+`GET /api/projects/{project_id}/recordings` 与 `GET /api/recordings/{recording_id}` 在录音 `status=failed` 时返回最近失败任务：
+
+```json
+{
+  "latest_failed_job_id": "job_xxx",
+  "latest_failed_job_type": "clean_transcript",
+  "latest_failed_job_error_code": "LLM_CLEAN_FAILED",
+  "latest_failed_job_error_message": "Read timed out",
+  "latest_failed_job_finished_at": "2026-05-09T06:19:32Z"
+}
+```
+
+前端用该字段在录音列表展示失败阶段和内联重试按钮；重试仍调用 `POST /api/jobs/{job_id}/retry`。

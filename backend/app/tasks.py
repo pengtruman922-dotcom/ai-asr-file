@@ -112,6 +112,15 @@ def retry_failed_job(job_id: str) -> str:
             raise ValueError("JOB_NOT_RETRYABLE")
         new = create_job(session, old.project_id, old.recording_id, old.job_type, old.metadata_json)
         new_id_value = new.id
+        if old.recording_id:
+            recording = session.get(Recording, old.recording_id)
+            if recording:
+                if old.job_type == "asr_transcription":
+                    recording.status = "queued"
+                elif old.job_type == "clean_transcript":
+                    recording.status = "asr_completed"
+                elif old.job_type == "summary_generation":
+                    recording.status = "cleaning_completed"
     enqueue_job(new_id_value)
     return new_id_value
 

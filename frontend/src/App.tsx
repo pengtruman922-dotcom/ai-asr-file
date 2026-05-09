@@ -549,6 +549,14 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     void loadProject();
   };
 
+  const retryFailedRecording = async (jobId?: string) => {
+    if (!jobId) return message.warning('未找到可重试的失败任务');
+    await api(`/api/jobs/${jobId}/retry`, { method: 'POST' });
+    message.success('已提交重试');
+    void loadProject();
+    void loadSelected();
+  };
+
   const deleteProject = () => {
     Modal.confirm({ title: '确认硬删除项目？', content: '将删除项目下所有录音、文件、纪要和问答历史。', okText: '确认删除', okButtonProps: { danger: true }, onOk: async () => { await api(`/api/projects/${projectId}`, { method: 'DELETE' }); message.success('项目已删除'); onBack(); } });
   };
@@ -599,6 +607,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
               onSelect={() => setSelectedId(rec.recording_id)}
               onCheck={(checked) => toggleRecordingCheck(rec.recording_id, checked)}
               onRename={(name) => renameRecording(rec.recording_id, name)}
+              onRetry={(jobId) => retryFailedRecording(jobId)}
               onDelete={() => deleteRecording(rec.recording_id)}
             />
           )} />
@@ -641,7 +650,7 @@ function ColumnResizeHandle({ side, active, onPointerDown, onDoubleClick }: { si
   />;
 }
 
-function RecordingListItem({ recording, active, checked, checkDisabled, clockNow, onSelect, onCheck, onRename, onDelete }: { recording: Recording; active: boolean; checked: boolean; checkDisabled: boolean; clockNow: number; onSelect: () => void; onCheck: (checked: boolean) => void; onRename: (name: string) => void; onDelete: () => void }) {
+function RecordingListItem({ recording, active, checked, checkDisabled, clockNow, onSelect, onCheck, onRename, onRetry, onDelete }: { recording: Recording; active: boolean; checked: boolean; checkDisabled: boolean; clockNow: number; onSelect: () => void; onCheck: (checked: boolean) => void; onRename: (name: string) => void; onRetry: (jobId?: string) => void; onDelete: () => void }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(recording.file_name);
   const skipBlurSaveRef = useRef(false);
@@ -651,6 +660,7 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
     submittedNameRef.current = '';
   }, [recording.file_name]);
   const mediaMeta = [`音频时长 ${formatDuration(recording.duration_seconds)}`, formatFileSize(recording.file_size_bytes)].filter(Boolean).join(' · ');
+  const failedStage = recording.latest_failed_job_type ? jobTypeLabel(recording.latest_failed_job_type) : '';
   const save = () => {
     if (skipBlurSaveRef.current) {
       skipBlurSaveRef.current = false;
@@ -683,8 +693,11 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
         <Space wrap className="recording-status-line">
           <Tag color={recording.status === 'failed' ? 'red' : isRecordingProcessing(recording.status) ? 'blue' : 'default'}>{recordingStatusLabel(recording.status)}</Tag>
           {isRecordingProcessing(recording.status) && <Text type="secondary">已处理 {elapsedSince(recordingTimerStart(recording), clockNow)}</Text>}
+          {recording.status === 'failed' && failedStage && <Tag color="red">失败阶段：{failedStage}</Tag>}
         </Space>
+        {recording.status === 'failed' && recording.latest_failed_job_error_message && <Text type="secondary" className="recording-error" title={recording.latest_failed_job_error_message}>{recording.latest_failed_job_error_message}</Text>}
         <Text type="secondary" className="recording-meta">{mediaMeta}</Text>
+        {recording.status === 'failed' && <Button size="small" type="link" className="recording-retry" onClick={(e) => { e.stopPropagation(); void onRetry(recording.latest_failed_job_id); }}>重试{failedStage ? ` ${failedStage}` : ''}</Button>}
       </div>
       <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={(e) => { e.stopPropagation(); void onDelete(); }} />
     </div>

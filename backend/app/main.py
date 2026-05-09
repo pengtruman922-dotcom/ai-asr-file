@@ -68,11 +68,19 @@ def project_payload(project: Project, db: Session):
 
 def recording_payload(recording: Recording, db: Session | None = None):
     current_job = None
+    latest_failed_job = None
     if db and recording.status not in {"created", "completed", "failed"}:
         current_job = (
             db.query(ProcessingJob)
             .filter(ProcessingJob.recording_id == recording.id, ProcessingJob.status.in_(["queued", "running"]))
             .order_by(ProcessingJob.created_at.desc())
+            .first()
+        )
+    if db and recording.status == "failed":
+        latest_failed_job = (
+            db.query(ProcessingJob)
+            .filter(ProcessingJob.recording_id == recording.id, ProcessingJob.status == "failed")
+            .order_by(ProcessingJob.finished_at.desc().nullslast(), ProcessingJob.updated_at.desc())
             .first()
         )
     payload = {
@@ -104,6 +112,16 @@ def recording_payload(recording: Recording, db: Session | None = None):
                 "current_job_status": current_job.status,
                 "current_job_created_at": serialize_dt(current_job.created_at),
                 "current_job_started_at": serialize_dt(current_job.started_at),
+            }
+        )
+    if latest_failed_job:
+        payload.update(
+            {
+                "latest_failed_job_id": latest_failed_job.id,
+                "latest_failed_job_type": latest_failed_job.job_type,
+                "latest_failed_job_error_code": latest_failed_job.error_code,
+                "latest_failed_job_error_message": latest_failed_job.error_message,
+                "latest_failed_job_finished_at": serialize_dt(latest_failed_job.finished_at),
             }
         )
     return payload

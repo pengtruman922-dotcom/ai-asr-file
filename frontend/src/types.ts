@@ -22,6 +22,11 @@ export type Recording = {
   current_job_status?: string;
   current_job_created_at?: string;
   current_job_started_at?: string;
+  latest_failed_job_id?: string;
+  latest_failed_job_type?: string;
+  latest_failed_job_error_code?: string;
+  latest_failed_job_error_message?: string;
+  latest_failed_job_finished_at?: string;
 };
 
 export type TranscriptSegment = {
