@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import { Button, Card, Checkbox, Dropdown, Form, Input, InputNumber, Layout, List, Modal, Progress, Select, Space, Table, Tabs, Tag, Typography, Upload, message } from 'antd';
 import { DeleteOutlined, DownloadOutlined, DownOutlined, EditOutlined, InboxOutlined, MoreOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
@@ -33,30 +33,6 @@ type RecordingStatus =
   | 'summary_generating'
   | 'completed'
   | 'failed';
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), Math.max(min, max));
-}
-
-function loadProjectColumnWidths(): ProjectColumnWidths {
-  try {
-    const saved = JSON.parse(localStorage.getItem(PROJECT_LAYOUT_STORAGE_KEY) || '{}');
-    return {
-      left: Number(saved.left) || PROJECT_LAYOUT_DEFAULT.left,
-      right: Number(saved.right) || PROJECT_LAYOUT_DEFAULT.right
-    };
-  } catch {
-    return PROJECT_LAYOUT_DEFAULT;
-  }
-}
-
-function normalizeProjectColumnWidths(widths: ProjectColumnWidths, containerWidth: number): ProjectColumnWidths {
-  const rightMax = Math.min(RIGHT_PANEL_MAX, containerWidth - LEFT_PANEL_MIN - MIDDLE_PANEL_MIN - RESIZE_HANDLE_TOTAL_WIDTH);
-  const right = clamp(widths.right, RIGHT_PANEL_MIN, rightMax);
-  const leftMax = Math.min(LEFT_PANEL_MAX, containerWidth - right - MIDDLE_PANEL_MIN - RESIZE_HANDLE_TOTAL_WIDTH);
-  const left = clamp(widths.left, LEFT_PANEL_MIN, leftMax);
-  return { left, right };
-}
 
 const RECORDING_STATUS_LABELS: Record<string, string> = {
   // Backend canonical statuses. Keep these in sync with backend/app/main.py and backend/app/tasks.py.
@@ -96,11 +72,6 @@ const PROCESSING_RECORDING_STATUSES = new Set<RecordingStatus>([
   'summary_generating',
 ]);
 
-function normalizeRecordingStatus(status?: string): RecordingStatus | '' {
-  if (!status) return '';
-  return (RECORDING_STATUS_ALIASES[status] || status) as RecordingStatus;
-}
-
 const JOB_TYPE_LABELS: Record<string, string> = {
   asr_transcription: 'ASR 转写',
   clean_transcript: '清洁稿生成',
@@ -116,8 +87,41 @@ const JOB_STATUS_LABELS: Record<string, string> = {
   failed: '失败',
 };
 
-function recordingStatusLabel(status: string) {
-  return RECORDING_STATUS_LABELS[status] || RECORDING_STATUS_LABELS[normalizeRecordingStatus(status)] || status || '-';
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+function loadProjectColumnWidths(): ProjectColumnWidths {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PROJECT_LAYOUT_STORAGE_KEY) || '{}');
+    return {
+      left: Number(saved.left) || PROJECT_LAYOUT_DEFAULT.left,
+      right: Number(saved.right) || PROJECT_LAYOUT_DEFAULT.right
+    };
+  } catch {
+    return PROJECT_LAYOUT_DEFAULT;
+  }
+}
+
+function normalizeProjectColumnWidths(widths: ProjectColumnWidths, containerWidth: number): ProjectColumnWidths {
+  const rightMax = Math.min(RIGHT_PANEL_MAX, containerWidth - LEFT_PANEL_MIN - MIDDLE_PANEL_MIN - RESIZE_HANDLE_TOTAL_WIDTH);
+  const right = clamp(widths.right, RIGHT_PANEL_MIN, rightMax);
+  const leftMax = Math.min(LEFT_PANEL_MAX, containerWidth - right - MIDDLE_PANEL_MIN - RESIZE_HANDLE_TOTAL_WIDTH);
+  const left = clamp(widths.left, LEFT_PANEL_MIN, leftMax);
+  return { left, right };
+}
+
+function normalizeRecordingStatus(status?: string): RecordingStatus | '' {
+  if (!status) return '';
+  return (RECORDING_STATUS_ALIASES[status] || status) as RecordingStatus;
+}
+
+function recordingStatusLabel(status?: string) {
+  return RECORDING_STATUS_LABELS[status || ''] || RECORDING_STATUS_LABELS[normalizeRecordingStatus(status)] || status || '-';
+}
+
+function recordingStatusClass(status?: string) {
+  return normalizeRecordingStatus(status) || status || 'unknown';
 }
 
 function jobTypeLabel(type: string) {
@@ -220,38 +224,44 @@ function emitQaStreamBlock(block: string, onEvent: (event: QaStreamEvent) => voi
   onEvent({ event, data: JSON.parse(data) });
 }
 
+function parseHash(): { view: 'home' | 'project' | 'settings'; projectId: string | null } {
+  const hash = window.location.hash;
+  const match = hash.match(/^#\/project\/([^/]+)$/);
+  if (match) return { view: 'project', projectId: match[1] };
+  if (hash === '#/settings') return { view: 'settings', projectId: null };
+  return { view: 'home', projectId: null };
+}
+
 function App() {
   const [token, setTokenState] = useState(getToken());
-  const [route, setRoute] = useState(readRoute);
+  const [{ view, projectId }, setNav] = useState(parseHash);
 
   useEffect(() => {
-    const onPopState = () => setRoute(readRoute());
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
+    const onHashChange = () => setNav(parseHash());
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  const navigate = (path: string) => {
-    window.history.pushState({}, '', path);
-    setRoute(readRoute());
+  const navigate = (next: { view: 'home' | 'project' | 'settings'; projectId?: string }) => {
+    if (next.view === 'project' && next.projectId) {
+      window.location.hash = `#/project/${next.projectId}`;
+    } else if (next.view === 'settings') {
+      window.location.hash = '#/settings';
+    } else {
+      window.location.hash = '';
+    }
+    setNav({ view: next.view, projectId: next.projectId ?? null });
   };
 
   if (!token) return <Login onLogin={(next) => { setToken(next); setTokenState(next); }} />;
 
   return (
     <Layout className="app-shell">
-      {route.view === 'home' && <Home onOpenProject={(id) => navigate(`/projects/${id}`)} onSettings={() => navigate('/settings')} onLogout={() => { clearToken(); setTokenState(''); }} />}
-      {route.view === 'project' && route.projectId && <ProjectPage projectId={route.projectId} onBack={() => navigate('/')} />}
-      {route.view === 'settings' && <SettingsPage onBack={() => navigate('/')} />}
+      {view === 'home' && <Home onOpenProject={(id) => navigate({ view: 'project', projectId: id })} onSettings={() => navigate({ view: 'settings' })} onLogout={() => { clearToken(); setTokenState(''); window.location.hash = ''; }} />}
+      {view === 'project' && projectId && <ProjectPage projectId={projectId} onBack={() => navigate({ view: 'home' })} />}
+      {view === 'settings' && <SettingsPage onBack={() => navigate({ view: 'home' })} />}
     </Layout>
   );
-}
-
-function readRoute(): { view: 'home' | 'project' | 'settings'; projectId?: string } {
-  const path = window.location.pathname;
-  const projectMatch = path.match(/^\/projects\/([^/]+)/);
-  if (projectMatch) return { view: 'project', projectId: decodeURIComponent(projectMatch[1]) };
-  if (path === '/settings') return { view: 'settings' };
-  return { view: 'home' };
 }
 
 function Login({ onLogin }: { onLogin: (token: string) => void }) {
@@ -269,13 +279,21 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
   };
   return (
     <div className="login-page">
+      <div className="login-brand">
+        <div className="login-logo">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>
+          </svg>
+        </div>
+        <span>录音分析工作台</span>
+      </div>
       <Card className="login-card">
-        <Title level={2}>录音访谈分析工作台</Title>
-        <Paragraph type="secondary">MVP 登录：admin / mp2026</Paragraph>
+        <Title level={3} style={{ marginBottom: 4 }}>欢迎回来</Title>
+        <Paragraph type="secondary" style={{ marginBottom: 24 }}>MVP 登录：admin / mp2026</Paragraph>
         <Form layout="vertical" initialValues={{ username: 'admin', password: 'mp2026' }} onFinish={onFinish}>
-          <Form.Item name="username" label="账号" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="password" label="密码" rules={[{ required: true }]}><Input.Password /></Form.Item>
-          <Button type="primary" htmlType="submit" loading={loading} block>登录</Button>
+          <Form.Item name="username" label="账号" rules={[{ required: true }]}><Input size="large" /></Form.Item>
+          <Form.Item name="password" label="密码" rules={[{ required: true }]}><Input.Password size="large" /></Form.Item>
+          <Button type="primary" htmlType="submit" loading={loading} block size="large" style={{ marginTop: 8 }}>登录</Button>
         </Form>
       </Card>
     </div>
@@ -334,36 +352,123 @@ function Home({ onOpenProject, onSettings, onLogout }: { onOpenProject: (id: str
     }
   });
 
+  const sortedProjects = useMemo(
+    () => [...projects].sort((a, b) => new Date(b.updated_at || '').getTime() - new Date(a.updated_at || '').getTime()),
+    [projects],
+  );
+
   return (
-    <>
-      <Header className="topbar"><Title level={3}>录音分析工作台</Title><Space><Button icon={<SettingOutlined />} onClick={onSettings}>设置</Button><Button onClick={onLogout}>退出</Button></Space></Header>
-      <Content className="home-content compact-home">
-        <div className="home-toolbar">
-          <Input.Search placeholder="搜索项目......" allowClear onSearch={setKeyword} onChange={(e) => !e.target.value && setKeyword('')} />
-          <Button type="primary" onClick={() => { setProjectName(''); setCreateOpen(true); }}>+ 新建项目</Button>
+    <div className="home-shell">
+      <header className="home-topbar">
+        <div className="home-topbar-brand">
+          <div className="home-topbar-logo">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>
+            </svg>
+          </div>
+          <span className="home-topbar-title">录音分析工作台</span>
         </div>
-        <Table
-          rowKey="project_id"
-          className="project-table"
-          dataSource={projects}
-          pagination={false}
-          onRow={(record) => ({ onClick: () => onOpenProject(record.project_id) })}
-          columns={[
-            { title: '项目', dataIndex: 'title' },
-            { title: '文件数量', dataIndex: 'recording_count', width: 120 },
-            { title: '总时长(h)', dataIndex: 'total_duration_seconds', width: 140, render: (v: number) => ((v || 0) / 3600).toFixed(1) },
-            { title: '最近更新', dataIndex: 'updated_at', width: 160, render: formatDate },
-            { title: '', width: 60, render: (_, record) => <Dropdown menu={actionMenu(record)} trigger={['click']}><Button type="text" icon={<MoreOutlined />} onClick={(e) => e.stopPropagation()} /></Dropdown> }
-          ]}
-        />
-        <Modal title="新建项目" open={createOpen} onCancel={() => setCreateOpen(false)} onOk={createProject} okText="确认创建">
-          <Input placeholder="输入项目名称" value={projectName} onChange={(e) => setProjectName(e.target.value)} onPressEnter={createProject} />
-        </Modal>
-        <Modal title="修改项目名称" open={!!editProject} onCancel={() => setEditProject(null)} onOk={updateProject} okText="保存">
-          <Input placeholder="输入项目名称" value={projectName} onChange={(e) => setProjectName(e.target.value)} onPressEnter={updateProject} />
-        </Modal>
-      </Content>
-    </>
+        <div className="home-topbar-actions">
+          <button className="topbar-btn" onClick={onSettings}><SettingOutlined /> 设置</button>
+          <button className="topbar-btn topbar-btn-ghost" onClick={onLogout}>退出</button>
+        </div>
+      </header>
+
+      <div className="home-hero">
+        <div className="home-hero-inner">
+          <h1 className="home-hero-title">你的录音分析工作台</h1>
+          <p className="home-hero-sub">上传访谈录音，自动转写、生成纪要，并基于内容进行智能问答</p>
+          <div className="home-search-row">
+            <Input.Search
+              className="home-search-antd"
+              placeholder="搜索项目......"
+              allowClear
+              onSearch={setKeyword}
+              onChange={(e) => { if (!e.target.value) setKeyword(''); }}
+            />
+            <button className="home-new-btn" onClick={() => { setProjectName(''); setCreateOpen(true); }}>
+              <span>+</span> 新建项目
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="home-body">
+        {projects.length === 0 ? (
+          <div className="home-empty">
+            <div className="home-empty-icon">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0"/><path d="M12 8v4"/><path d="M12 16h.01"/>
+              </svg>
+            </div>
+            <p className="home-empty-title">还没有项目</p>
+            <p className="home-empty-sub">点击「新建项目」开始你的第一个录音分析项目</p>
+          </div>
+        ) : (
+          <Table
+            rowKey="project_id"
+            className="project-table home-project-table"
+            dataSource={sortedProjects}
+            pagination={false}
+            onRow={(record) => ({ onClick: () => onOpenProject(record.project_id) })}
+            columns={[
+              { title: '项目', dataIndex: 'title', render: (value: string) => <Text strong>{value}</Text> },
+              { title: '文件数量', dataIndex: 'recording_count', width: 120, render: (value: number) => value ?? 0 },
+              { title: '总时长(h)', dataIndex: 'total_duration_seconds', width: 140, render: (value: number) => ((value || 0) / 3600).toFixed(1) },
+              { title: '最近更新', dataIndex: 'updated_at', width: 160, render: formatDate },
+              { title: '', width: 60, render: (_, record) => <Dropdown menu={actionMenu(record)} trigger={['click']}><Button type="text" icon={<MoreOutlined />} onClick={(e) => e.stopPropagation()} /></Dropdown> },
+            ]}
+          />
+        )}
+      </div>
+
+      <Modal
+        title="新建项目"
+        open={createOpen}
+        onCancel={() => setCreateOpen(false)}
+        onOk={createProject}
+        okText="确认创建 →"
+        cancelText="取消"
+        width={480}
+        okButtonProps={{ disabled: !projectName.trim() || projectName.length > 50 }}
+      >
+        <div className="project-modal-body">
+          <div className="project-modal-label">项目名称</div>
+          <Input
+            size="large"
+            placeholder="例：2025年Q2用户访谈"
+            value={projectName}
+            onChange={(e) => setProjectName(e.target.value)}
+            onPressEnter={createProject}
+            maxLength={50}
+            showCount
+          />
+        </div>
+      </Modal>
+      <Modal
+        title="修改项目名称"
+        open={!!editProject}
+        onCancel={() => setEditProject(null)}
+        onOk={updateProject}
+        okText="保存修改"
+        cancelText="取消"
+        width={480}
+        okButtonProps={{ disabled: !projectName.trim() || projectName.length > 50 }}
+      >
+        <div className="project-modal-body">
+          <div className="project-modal-label">项目名称</div>
+          <Input
+            size="large"
+            placeholder="输入项目名称"
+            value={projectName}
+            onChange={(e) => setProjectName(e.target.value)}
+            onPressEnter={updateProject}
+            maxLength={50}
+            showCount
+          />
+        </div>
+      </Modal>
+    </div>
   );
 }
 
@@ -449,6 +554,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   useEffect(() => { void loadSelected(); }, [loadSelected]);
   useEffect(() => { void loadThreads(); }, [loadThreads]);
   useEffect(() => { void loadThread(); }, [loadThread]);
+
   useEffect(() => {
     const hasRunningRecording = recordings.some((item) => isRecordingProcessing(item.status));
     const hasRunningMessage = !qaStreaming && messages.some((item) => ['queued', 'running'].includes(item.status));
@@ -572,8 +678,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     }
     setSummary((prev: any) => prev ? { ...prev, stale: true } : prev);
     message.success(result.updated_count && result.updated_count > 1 ? `已保存并替换 ${result.updated_count} 段，纪要已标记为过期` : '已保存，纪要已标记为过期');
-    void loadSelected();
     void loadProject();
+    void loadSelected();
   };
 
   const regenerateSummary = async () => {
@@ -689,15 +795,11 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   };
 
   const retryFailedRecording = async (jobId?: string) => {
-    if (!jobId) return message.warning('未找到可重试的失败任务');
+    if (!jobId) return message.warning('没有可重试的失败任务');
     await api(`/api/jobs/${jobId}/retry`, { method: 'POST' });
     message.success('已提交重试');
     void loadProject();
     void loadSelected();
-  };
-
-  const deleteProject = () => {
-    Modal.confirm({ title: '确认硬删除项目？', content: '将删除项目下所有录音、文件、纪要和问答历史。', okText: '确认删除', okButtonProps: { danger: true }, onOk: async () => { await api(`/api/projects/${projectId}`, { method: 'DELETE' }); message.success('项目已删除'); onBack(); } });
   };
 
   const toggleRecordingCheck = (id: string, checked: boolean) => {
@@ -718,6 +820,10 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     });
   };
 
+  const deleteProject = () => {
+    Modal.confirm({ title: '确认硬删除项目？', content: '将删除项目下所有录音、文件、纪要和问答历史。', okText: '确认删除', okButtonProps: { danger: true }, onOk: async () => { await api(`/api/projects/${projectId}`, { method: 'DELETE' }); message.success('项目已删除'); onBack(); } });
+  };
+
   const exportMd = async (type: 'summary' | 'transcript') => {
     if (!selectedId) return;
     const data = await api<{ download_url: string; filename?: string; content?: string }>(`/api/recordings/${selectedId}/exports`, { method: 'POST', body: JSON.stringify({ export_type: type, format: 'markdown' }) });
@@ -728,9 +834,26 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     window.open(data.download_url, '_blank');
   };
 
+  const projectMoreMenu: MenuProps = {
+    items: [
+      { key: 'delete', label: '删除项目', danger: true, icon: <DeleteOutlined /> }
+    ],
+    onClick: ({ key }) => {
+      if (key === 'delete') deleteProject();
+    }
+  };
+
   return (
     <div className="project-shell">
-      <div className="project-title"><Space><Button onClick={onBack}>返回首页</Button><Title level={4}>{project?.title || '项目'}</Title></Space><Button danger icon={<DeleteOutlined />} onClick={deleteProject}>删除项目</Button></div>
+      <div className="project-title">
+        <Space>
+          <Button onClick={onBack}>← 返回首页</Button>
+          <Title level={4} style={{ margin: 0 }}>{project?.title || '项目'}</Title>
+        </Space>
+        <Dropdown menu={projectMoreMenu} trigger={['click']} placement="bottomRight">
+          <Button icon={<MoreOutlined />}>更多操作</Button>
+        </Dropdown>
+      </div>
       <div ref={workspaceRef} className={`workspace-grid ${activeResize ? 'resizing' : ''}`} style={workspaceStyle}>
         <aside className="left-panel panel-scroll">
           <Space className="panel-actions"><Button type="primary" icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>上传录音</Button><Button onClick={() => setQueueOpen(true)}>处理队列</Button></Space>
@@ -755,8 +878,20 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
         <ColumnResizeHandle side="left" active={activeResize === 'left'} onPointerDown={(event) => startColumnResize('left', event)} onDoubleClick={resetColumnWidths} />
         <main className="middle-panel">
           <div className="middle-toolbar">
-            <div><Text strong>{selectedRecording?.file_name || '请选择录音'}</Text><br /><Text type="secondary">状态：{recordingStatusLabel(selectedRecording?.status || '')}{isRecordingProcessing(selectedRecording?.status) && ` · 已处理 ${elapsedSince(recordingTimerStart(selectedRecording), clockNow)}`}</Text></div>
-            <Space><Button onClick={() => setShowRaw((v) => !v)}>{showRaw ? '隐藏原始稿' : '显示原始稿'}</Button><Button icon={<DownloadOutlined />} onClick={() => exportMd('transcript')}>导出清洁稿</Button></Space>
+            <div className="middle-toolbar-info">
+              <Text strong className="toolbar-filename">{selectedRecording?.file_name || '请选择录音'}</Text>
+              {selectedRecording && (
+                <span className={`status-dot-label status-${recordingStatusClass(selectedRecording.status)}`}>
+                  <span className="status-dot" />
+                  {recordingStatusLabel(selectedRecording.status)}
+                  {isRecordingProcessing(selectedRecording.status) && ` · 已处理 ${elapsedSince(recordingTimerStart(selectedRecording), clockNow)}`}
+                </span>
+              )}
+            </div>
+            <Space size={6} className="middle-toolbar-actions">
+              <Button size="small" onClick={() => setShowRaw((v) => !v)}>{showRaw ? '隐藏原始稿' : '显示原始稿'}</Button>
+              <Button size="small" icon={<DownloadOutlined />} onClick={() => exportMd('transcript')}>导出清洁稿</Button>
+            </Space>
           </div>
           <div className="transcript-list panel-scroll">
             {segments.map((seg) => <SegmentEditor key={seg.segment_id} segment={seg} showRaw={showRaw} onJump={jumpTo} onSave={saveSegment} />)}
@@ -798,8 +933,8 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
     setName(recording.file_name);
     submittedNameRef.current = '';
   }, [recording.file_name]);
-  const mediaMeta = [`音频时长 ${formatDuration(recording.duration_seconds)}`, formatFileSize(recording.file_size_bytes)].filter(Boolean).join(' · ');
   const failedStage = recording.latest_failed_job_type ? jobTypeLabel(recording.latest_failed_job_type) : '';
+  const mediaMeta = [`音频时长 ${formatDuration(recording.duration_seconds)}`, formatFileSize(recording.file_size_bytes)].filter(Boolean).join(' · ');
   const save = () => {
     if (skipBlurSaveRef.current) {
       skipBlurSaveRef.current = false;
@@ -827,10 +962,13 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
       <Checkbox checked={checked} disabled={checkDisabled} onClick={(e) => e.stopPropagation()} onChange={(e) => onCheck(e.target.checked)} />
       <div className="recording-main">
         <div className="recording-name" onClick={(e) => e.stopPropagation()}>
-          {editing ? <Input size="small" value={name} autoFocus onFocus={(e) => e.target.select()} onBlur={save} onChange={(e) => setName(e.target.value)} onPressEnter={save} onKeyDown={(e) => { if (e.key === 'Escape') cancelEdit(); }} /> : <><Text strong>{recording.file_name}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(true)} /></>}
+          {editing ? <Input size="small" value={name} autoFocus onFocus={(e) => e.target.select()} onBlur={save} onChange={(e) => setName(e.target.value)} onPressEnter={save} onKeyDown={(e) => { if (e.key === 'Escape') cancelEdit(); }} /> : <><Text strong className="recording-filename">{recording.file_name}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(true)} /></>}
         </div>
         <Space wrap className="recording-status-line">
-          <Tag color={recording.status === 'failed' ? 'red' : isRecordingProcessing(recording.status) ? 'blue' : 'default'}>{recordingStatusLabel(recording.status)}</Tag>
+          <span className={`status-dot-label status-${recordingStatusClass(recording.status)}`}>
+            <span className="status-dot" />
+            {recordingStatusLabel(recording.status)}
+          </span>
           {isRecordingProcessing(recording.status) && <Text type="secondary">已处理 {elapsedSince(recordingTimerStart(recording), clockNow)}{recording.current_job_progress !== undefined ? ` · ${recording.current_job_progress}%` : ''}</Text>}
           {recording.status === 'failed' && failedStage && <Tag color="red">失败阶段：{failedStage}</Tag>}
         </Space>
@@ -985,10 +1123,10 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
       setFiles([]);
       setProgress(0);
       closeAfterClientUpload();
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : '上传失败';
-      setUploadError(errorMessage);
-      message.error(errorMessage);
+    } catch (err) {
+      const text = err instanceof Error ? err.message : '上传失败';
+      setUploadError(text);
+      message.error(text);
     } finally {
       setUploading(false);
     }
@@ -1025,19 +1163,6 @@ function safeParseJson(text: string) {
     return null;
   }
 }
-
-function downloadTextFile(content: string, filename: string) {
-  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-}
-
 
 function readAudioDuration(file: File) {
   return new Promise<number | null>((resolve) => {
@@ -1318,6 +1443,18 @@ function formatMonthDayTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value.slice(5, 16);
   return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function downloadTextFile(content: string, filename: string) {
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }
 
 export default App;
