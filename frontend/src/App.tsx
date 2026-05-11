@@ -455,9 +455,26 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     window.open(data.download_url, '_blank');
   };
 
+  const projectMoreMenu: MenuProps = {
+    items: [
+      { key: 'delete', label: '删除项目', danger: true, icon: <DeleteOutlined /> }
+    ],
+    onClick: ({ key }) => {
+      if (key === 'delete') deleteProject();
+    }
+  };
+
   return (
     <div className="project-shell">
-      <div className="project-title"><Space><Button onClick={onBack}>返回首页</Button><Title level={4}>{project?.title || '项目'}</Title></Space><Button danger icon={<DeleteOutlined />} onClick={deleteProject}>删除项目</Button></div>
+      <div className="project-title">
+        <Space>
+          <Button onClick={onBack}>← 返回首页</Button>
+          <Title level={4} style={{ margin: 0 }}>{project?.title || '项目'}</Title>
+        </Space>
+        <Dropdown menu={projectMoreMenu} trigger={['click']} placement="bottomRight">
+          <Button icon={<MoreOutlined />}>更多操作</Button>
+        </Dropdown>
+      </div>
       <div ref={workspaceRef} className={`workspace-grid ${activeResize ? 'resizing' : ''}`} style={workspaceStyle}>
         <aside className="left-panel panel-scroll">
           <Space className="panel-actions"><Button type="primary" icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>上传录音</Button><Button onClick={() => setQueueOpen(true)}>处理队列</Button></Space>
@@ -467,7 +484,16 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
             <List.Item className={rec.recording_id === selectedId ? 'recording active' : 'recording'} onClick={() => setSelectedId(rec.recording_id)}>
               <div className="recording-row">
                 <Checkbox checked={checkedIds.includes(rec.recording_id)} onClick={(e) => e.stopPropagation()} onChange={(e) => setCheckedIds((prev) => e.target.checked ? [...prev, rec.recording_id].slice(0, 10) : prev.filter((id) => id !== rec.recording_id))} />
-                <div className="recording-main"><Text strong>{rec.file_name}</Text><Space><Tag>{rec.status}</Tag><Text type="secondary">{formatDuration(rec.duration_seconds)}</Text></Space></div>
+                <div className="recording-main">
+                  <Text strong className="recording-filename">{rec.file_name}</Text>
+                  <div className="recording-meta">
+                    <span className={`status-dot-label status-${rec.status}`}>
+                      <span className="status-dot" />
+                      {rec.status}
+                    </span>
+                    <span className="recording-duration">{formatDuration(rec.duration_seconds)}</span>
+                  </div>
+                </div>
                 <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={(e) => { e.stopPropagation(); void deleteRecording(rec.recording_id); }} />
               </div>
             </List.Item>
@@ -477,8 +503,20 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
         <ColumnResizeHandle side="left" active={activeResize === 'left'} onPointerDown={(event) => startColumnResize('left', event)} onDoubleClick={resetColumnWidths} />
         <main className="middle-panel">
           <div className="middle-toolbar">
-            <div><Text strong>{selectedRecording?.file_name || '请选择录音'}</Text><br /><Text type="secondary">状态：{selectedRecording?.status || '-'}</Text></div>
-            <Space><Button onClick={() => setShowRaw((v) => !v)}>{showRaw ? '隐藏原始稿' : '显示原始稿'}</Button><Button icon={<ReloadOutlined />} onClick={regenerateSummary}>重新生成纪要</Button><Button icon={<DownloadOutlined />} onClick={() => exportMd('transcript')}>导出清洁稿</Button></Space>
+            <div className="middle-toolbar-info">
+              <Text strong className="toolbar-filename">{selectedRecording?.file_name || '请选择录音'}</Text>
+              {selectedRecording && (
+                <span className={`status-dot-label status-${selectedRecording.status}`}>
+                  <span className="status-dot" />
+                  {selectedRecording.status}
+                </span>
+              )}
+            </div>
+            <Space size={6} className="middle-toolbar-actions">
+              <Button size="small" onClick={() => setShowRaw((v) => !v)}>{showRaw ? '隐藏原始稿' : '显示原始稿'}</Button>
+              <Button size="small" icon={<ReloadOutlined />} onClick={regenerateSummary}>重新生成纪要</Button>
+              <Button size="small" icon={<DownloadOutlined />} onClick={() => exportMd('transcript')}>导出清洁稿</Button>
+            </Space>
           </div>
           <div className="transcript-list panel-scroll">
             {segments.map((seg) => <SegmentEditor key={seg.segment_id} segment={seg} showRaw={showRaw} onJump={jumpTo} onSave={saveSegment} />)}
@@ -515,15 +553,32 @@ function SegmentEditor({ segment, showRaw, onJump, onSave }: { segment: Transcri
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(segment);
   useEffect(() => setDraft(segment), [segment]);
-  return <Card size="small" className="segment-card">
-    <Space align="start">
-      <Button type="link" onClick={() => onJump(segment.start_time_ms)}>{formatMs(segment.start_time_ms)}</Button>
+  return (
+    <div className="segment-card">
+      <div className="segment-header">
+        <button className="segment-time" onClick={() => onJump(segment.start_time_ms)}>{formatMs(segment.start_time_ms)}</button>
+        {!editing && <span className="speaker-badge">{segment.speaker}</span>}
+      </div>
       <div className="segment-body">
-        {editing ? <Space direction="vertical" style={{ width: '100%' }}><Input value={draft.speaker} onChange={(e) => setDraft({ ...draft, speaker: e.target.value })} /><Input.TextArea rows={3} value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} /><Space><Button type="primary" onClick={() => { setEditing(false); onSave(draft); }}>保存</Button><Button onClick={() => setEditing(false)}>取消</Button></Space></Space> : <><Text strong>{segment.speaker}：</Text><Text>{segment.text}</Text><Button size="small" type="link" onClick={() => setEditing(true)}>编辑</Button></>}
+        {editing ? (
+          <Space direction="vertical" style={{ width: '100%' }}>
+            <Input value={draft.speaker} onChange={(e) => setDraft({ ...draft, speaker: e.target.value })} placeholder="发言人" />
+            <Input.TextArea rows={3} value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} />
+            <Space>
+              <Button type="primary" size="small" onClick={() => { setEditing(false); onSave(draft); }}>保存</Button>
+              <Button size="small" onClick={() => setEditing(false)}>取消</Button>
+            </Space>
+          </Space>
+        ) : (
+          <div className="segment-text-row">
+            <Text className="segment-text">{segment.text}</Text>
+            <Button size="small" type="link" className="segment-edit-btn" onClick={() => setEditing(true)}>编辑</Button>
+          </div>
+        )}
         {showRaw && segment.raw_text && <Paragraph className="raw-text">{segment.raw_text}</Paragraph>}
       </div>
-    </Space>
-  </Card>;
+    </div>
+  );
 }
 
 function SummaryView({ summary, stale, onExport }: { summary: any; stale?: boolean; onExport: () => void }) {
