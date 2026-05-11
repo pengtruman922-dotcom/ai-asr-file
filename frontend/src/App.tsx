@@ -76,13 +76,21 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
   };
   return (
     <div className="login-page">
+      <div className="login-brand">
+        <div className="login-logo">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>
+          </svg>
+        </div>
+        <span>录音分析工作台</span>
+      </div>
       <Card className="login-card">
-        <Title level={2}>录音访谈分析工作台</Title>
-        <Paragraph type="secondary">MVP 登录：admin / mp2026</Paragraph>
+        <Title level={3} style={{ marginBottom: 4 }}>欢迎回来</Title>
+        <Paragraph type="secondary" style={{ marginBottom: 24 }}>MVP 登录：admin / mp2026</Paragraph>
         <Form layout="vertical" initialValues={{ username: 'admin', password: 'mp2026' }} onFinish={onFinish}>
-          <Form.Item name="username" label="账号" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="password" label="密码" rules={[{ required: true }]}><Input.Password /></Form.Item>
-          <Button type="primary" htmlType="submit" loading={loading} block>登录</Button>
+          <Form.Item name="username" label="账号" rules={[{ required: true }]}><Input size="large" /></Form.Item>
+          <Form.Item name="password" label="密码" rules={[{ required: true }]}><Input.Password size="large" /></Form.Item>
+          <Button type="primary" htmlType="submit" loading={loading} block size="large" style={{ marginTop: 8 }}>登录</Button>
         </Form>
       </Card>
     </div>
@@ -142,35 +150,97 @@ function Home({ onOpenProject, onSettings, onLogout }: { onOpenProject: (id: str
   });
 
   return (
-    <>
-      <Header className="topbar"><Title level={3}>录音分析工作台</Title><Space><Button icon={<SettingOutlined />} onClick={onSettings}>设置</Button><Button onClick={onLogout}>退出</Button></Space></Header>
-      <Content className="home-content compact-home">
-        <div className="home-toolbar">
-          <Input.Search placeholder="搜索项目......" allowClear onSearch={setKeyword} onChange={(e) => !e.target.value && setKeyword('')} />
-          <Button type="primary" onClick={() => { setProjectName(''); setCreateOpen(true); }}>+ 新建项目</Button>
+    <div className="home-shell">
+      <header className="home-topbar">
+        <div className="home-topbar-brand">
+          <div className="home-topbar-logo">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>
+            </svg>
+          </div>
+          <span className="home-topbar-title">录音分析工作台</span>
         </div>
-        <Table
-          rowKey="project_id"
-          className="project-table"
-          dataSource={projects}
-          pagination={false}
-          onRow={(record) => ({ onClick: () => onOpenProject(record.project_id) })}
-          columns={[
-            { title: '项目', dataIndex: 'title' },
-            { title: '文件数量', dataIndex: 'recording_count', width: 120 },
-            { title: '总时长(h)', dataIndex: 'total_duration_seconds', width: 140, render: (v: number) => ((v || 0) / 3600).toFixed(1) },
-            { title: '最近更新', dataIndex: 'updated_at', width: 160, render: formatDate },
-            { title: '', width: 60, render: (_, record) => <Dropdown menu={actionMenu(record)} trigger={['click']}><Button type="text" icon={<MoreOutlined />} onClick={(e) => e.stopPropagation()} /></Dropdown> }
-          ]}
-        />
-        <Modal title="新建项目" open={createOpen} onCancel={() => setCreateOpen(false)} onOk={createProject} okText="确认创建">
-          <Input placeholder="输入项目名称" value={projectName} onChange={(e) => setProjectName(e.target.value)} onPressEnter={createProject} />
-        </Modal>
-        <Modal title="修改项目名称" open={!!editProject} onCancel={() => setEditProject(null)} onOk={updateProject} okText="保存">
-          <Input placeholder="输入项目名称" value={projectName} onChange={(e) => setProjectName(e.target.value)} onPressEnter={updateProject} />
-        </Modal>
-      </Content>
-    </>
+        <div className="home-topbar-actions">
+          <button className="topbar-btn" onClick={onSettings}><SettingOutlined /> 设置</button>
+          <button className="topbar-btn topbar-btn-ghost" onClick={onLogout}>退出</button>
+        </div>
+      </header>
+
+      <div className="home-hero">
+        <div className="home-hero-inner">
+          <h1 className="home-hero-title">你的录音分析工作台</h1>
+          <p className="home-hero-sub">上传访谈录音，自动转写、生成纪要，并基于内容进行智能问答</p>
+          <div className="home-search-row">
+            <div className="home-search-wrap">
+              <svg className="home-search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+              </svg>
+              <input
+                className="home-search-input"
+                placeholder="搜索项目..."
+                onChange={(e) => { if (!e.target.value) setKeyword(''); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') setKeyword((e.target as HTMLInputElement).value); }}
+              />
+            </div>
+            <button className="home-new-btn" onClick={() => { setProjectName(''); setCreateOpen(true); }}>
+              <span>+</span> 新建项目
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="home-body">
+        {projects.length === 0 ? (
+          <div className="home-empty">
+            <div className="home-empty-icon">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0"/><path d="M12 8v4"/><path d="M12 16h.01"/>
+              </svg>
+            </div>
+            <p className="home-empty-title">还没有项目</p>
+            <p className="home-empty-sub">点击「新建项目」开始你的第一个录音分析项目</p>
+          </div>
+        ) : (
+          <div className="project-grid">
+            {projects.map((project) => (
+              <div key={project.project_id} className="project-card" onClick={() => onOpenProject(project.project_id)}>
+                <div className="project-card-header">
+                  <div className="project-card-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>
+                    </svg>
+                  </div>
+                  <Dropdown menu={actionMenu(project)} trigger={['click']}>
+                    <button className="project-card-more" onClick={(e) => e.stopPropagation()}>
+                      <MoreOutlined />
+                    </button>
+                  </Dropdown>
+                </div>
+                <div className="project-card-body">
+                  <h3 className="project-card-title">{project.title}</h3>
+                  <div className="project-card-meta">
+                    <span>{project.recording_count ?? 0} 个文件</span>
+                    <span className="meta-dot">·</span>
+                    <span>{((project.total_duration_seconds || 0) / 3600).toFixed(1)} 小时</span>
+                  </div>
+                </div>
+                <div className="project-card-footer">
+                  <span className="project-card-date">更新于 {formatDate(project.updated_at)}</span>
+                  <span className="project-card-open">打开 →</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <Modal title="新建项目" open={createOpen} onCancel={() => setCreateOpen(false)} onOk={createProject} okText="确认创建">
+        <Input placeholder="输入项目名称" value={projectName} onChange={(e) => setProjectName(e.target.value)} onPressEnter={createProject} />
+      </Modal>
+      <Modal title="修改项目名称" open={!!editProject} onCancel={() => setEditProject(null)} onOk={updateProject} okText="保存">
+        <Input placeholder="输入项目名称" value={projectName} onChange={(e) => setProjectName(e.target.value)} onPressEnter={updateProject} />
+      </Modal>
+    </div>
   );
 }
 
