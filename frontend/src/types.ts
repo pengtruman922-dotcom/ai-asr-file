@@ -20,7 +20,6 @@ export type Recording = {
   updated_at?: string;
   current_job_type?: string;
   current_job_status?: string;
-  current_job_progress?: number;
   current_job_created_at?: string;
   current_job_started_at?: string;
   latest_failed_job_id?: string;

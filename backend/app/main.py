@@ -133,7 +133,6 @@ def recording_payload(recording: Recording, db: Session | None = None):
             {
                 "current_job_type": current_job.job_type,
                 "current_job_status": current_job.status,
-                "current_job_progress": current_job.progress,
                 "current_job_created_at": serialize_dt(current_job.created_at),
                 "current_job_started_at": serialize_dt(current_job.started_at),
             }
