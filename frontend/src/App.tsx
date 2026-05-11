@@ -20,6 +20,19 @@ const RESIZE_HANDLE_TOTAL_WIDTH = 16;
 
 type ProjectColumnWidths = typeof PROJECT_LAYOUT_DEFAULT;
 type ResizeDivider = 'left' | 'right';
+type SegmentSaveOptions = { replaceSameSpeaker?: boolean };
+type SegmentUpdateResult = { summary_stale?: boolean; updated_count?: number };
+type RecordingStatus =
+  | 'created'
+  | 'uploading'
+  | 'queued'
+  | 'asr_processing'
+  | 'asr_completed'
+  | 'cleaning'
+  | 'cleaning_completed'
+  | 'summary_generating'
+  | 'completed'
+  | 'failed';
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), Math.max(min, max));
@@ -46,6 +59,7 @@ function normalizeProjectColumnWidths(widths: ProjectColumnWidths, containerWidt
 }
 
 const RECORDING_STATUS_LABELS: Record<string, string> = {
+  // Backend canonical statuses. Keep these in sync with backend/app/main.py and backend/app/tasks.py.
   created: '草稿',
   uploading: '上传中',
   queued: '排队中',
@@ -56,7 +70,36 @@ const RECORDING_STATUS_LABELS: Record<string, string> = {
   summary_generating: '纪要生成中',
   completed: '处理完成',
   failed: '处理失败',
+  // UI-only aliases kept for compatibility with visual refactors; business logic normalizes them first.
+  uploaded: '已上传',
+  pending: '排队中',
+  transcribing: '识别中',
+  summarizing: '纪要生成中',
+  processing: '处理中',
 };
+
+const RECORDING_STATUS_ALIASES: Record<string, RecordingStatus> = {
+  uploaded: 'queued',
+  pending: 'queued',
+  transcribing: 'asr_processing',
+  summarizing: 'summary_generating',
+  processing: 'queued',
+};
+
+const PROCESSING_RECORDING_STATUSES = new Set<RecordingStatus>([
+  'uploading',
+  'queued',
+  'asr_processing',
+  'asr_completed',
+  'cleaning',
+  'cleaning_completed',
+  'summary_generating',
+]);
+
+function normalizeRecordingStatus(status?: string): RecordingStatus | '' {
+  if (!status) return '';
+  return (RECORDING_STATUS_ALIASES[status] || status) as RecordingStatus;
+}
 
 const JOB_TYPE_LABELS: Record<string, string> = {
   asr_transcription: 'ASR 转写',
@@ -74,7 +117,7 @@ const JOB_STATUS_LABELS: Record<string, string> = {
 };
 
 function recordingStatusLabel(status: string) {
-  return RECORDING_STATUS_LABELS[status] || status || '-';
+  return RECORDING_STATUS_LABELS[status] || RECORDING_STATUS_LABELS[normalizeRecordingStatus(status)] || status || '-';
 }
 
 function jobTypeLabel(type: string) {
@@ -86,15 +129,17 @@ function jobStatusLabel(status: string) {
 }
 
 function isRecordingProcessing(status?: string) {
-  return Boolean(status && !['completed', 'failed', 'created'].includes(status));
+  const normalized = normalizeRecordingStatus(status);
+  return Boolean(normalized && PROCESSING_RECORDING_STATUSES.has(normalized));
 }
 
 function isRecordingPlayable(status?: string) {
-  return Boolean(status && !['created', 'uploading', 'failed'].includes(status));
+  const normalized = normalizeRecordingStatus(status);
+  return Boolean(normalized && !['created', 'uploading', 'failed'].includes(normalized));
 }
 
 function isRecordingReadyForQa(status?: string) {
-  return status === 'completed';
+  return normalizeRecordingStatus(status) === 'completed';
 }
 
 function defaultQaSelection(recordings: Recording[]) {
@@ -512,13 +557,21 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     void audioRef.current.play();
   };
 
-  const saveSegment = async (seg: TranscriptSegment, options?: { replaceSameSpeaker?: boolean }) => {
-    await api(`/api/transcript-segments/${seg.segment_id}`, { method: 'PATCH', body: JSON.stringify({ speaker: seg.speaker, text: seg.text, replace_same_speaker: !!options?.replaceSameSpeaker }) });
+  const saveSegment = async (seg: TranscriptSegment, options?: SegmentSaveOptions) => {
+    const result = await api<SegmentUpdateResult>(`/api/transcript-segments/${seg.segment_id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        speaker: seg.speaker,
+        text: seg.text,
+        // Backend only performs "replace all same speaker" when this snake_case flag is true.
+        replace_same_speaker: !!options?.replaceSameSpeaker,
+      }),
+    });
     if (selectedId) {
       setRecordings((prev) => prev.map((item) => item.recording_id === selectedId ? { ...item, summary_stale: true } : item));
     }
     setSummary((prev: any) => prev ? { ...prev, stale: true } : prev);
-    message.success('已保存，纪要已标记为过期');
+    message.success(result.updated_count && result.updated_count > 1 ? `已保存并替换 ${result.updated_count} 段，纪要已标记为过期` : '已保存，纪要已标记为过期');
     void loadSelected();
     void loadProject();
   };
@@ -790,7 +843,7 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
   </List.Item>;
 }
 
-function SegmentEditor({ segment, showRaw, onJump, onSave }: { segment: TranscriptSegment; showRaw: boolean; onJump: (ms: number) => void; onSave: (seg: TranscriptSegment, options?: { replaceSameSpeaker?: boolean }) => void }) {
+function SegmentEditor({ segment, showRaw, onJump, onSave }: { segment: TranscriptSegment; showRaw: boolean; onJump: (ms: number) => void; onSave: (seg: TranscriptSegment, options?: SegmentSaveOptions) => void }) {
   const [editingSpeaker, setEditingSpeaker] = useState(false);
   const [editingText, setEditingText] = useState(false);
   const [draft, setDraft] = useState(segment);
