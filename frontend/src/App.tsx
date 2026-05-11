@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
-import { Button, Card, Checkbox, Dropdown, Form, Input, InputNumber, Layout, List, Modal, Progress, Select, Space, Table, Tabs, Tag, Typography, Upload, message } from 'antd';
+import { Button, Card, Checkbox, Dropdown, Form, Input, InputNumber, Layout, List, Modal, Progress, Radio, Select, Space, Table, Tabs, Tag, Typography, Upload, message } from 'antd';
 import { DeleteOutlined, DownloadOutlined, DownOutlined, EditOutlined, InboxOutlined, MoreOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
 import type { MenuProps, UploadFile } from 'antd';
 import { api, clearToken, formatDuration, formatMs, getToken, setToken } from './api';
@@ -969,7 +969,7 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
             <span className="status-dot" />
             {recordingStatusLabel(recording.status)}
           </span>
-          {isRecordingProcessing(recording.status) && <Text type="secondary">已处理 {elapsedSince(recordingTimerStart(recording), clockNow)}{recording.current_job_progress !== undefined ? ` · ${recording.current_job_progress}%` : ''}</Text>}
+          {isRecordingProcessing(recording.status) && <Text type="secondary">已处理 {elapsedSince(recordingTimerStart(recording), clockNow)}</Text>}
           {recording.status === 'failed' && failedStage && <Tag color="red">失败阶段：{failedStage}</Tag>}
         </Space>
         {recording.status === 'failed' && recording.latest_failed_job_error_message && <Text type="secondary" className="recording-error" title={recording.latest_failed_job_error_message}>{recording.latest_failed_job_error_message}</Text>}
@@ -1082,6 +1082,7 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const [limits, setLimits] = useState<AppSettings['basic']>({ max_upload_size_mb: 500, max_recording_duration_hours: 3 });
+  const [speakerMode, setSpeakerMode] = useState<'2' | '3' | '4' | 'auto'>('2');
 
   useEffect(() => {
     if (!open) return;
@@ -1101,11 +1102,13 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
         return;
       }
       const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      const speakerCount = speakerMode === 'auto' ? 'auto' : speakerMode;
       setProgress(0);
-      const session = await api<any>(`/api/projects/${projectId}/recordings/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: duration ? Math.round(duration) : 0, template_type: 'customer_interview' }) });
+      const session = await api<any>(`/api/projects/${projectId}/recordings/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: duration ? Math.round(duration) : 0, template_type: 'customer_interview', speaker_count: speakerCount }) });
       onCreated(session.recording_id);
       const form = new FormData();
       form.append('file', file);
+      form.append('speaker_count', speakerCount);
       let closedAfterClientUpload = false;
       const closeAfterClientUpload = () => {
         if (closedAfterClientUpload) return;
@@ -1122,6 +1125,7 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
       message.success('上传完成，已进入处理队列');
       setFiles([]);
       setProgress(0);
+      setSpeakerMode('2');
       closeAfterClientUpload();
     } catch (err) {
       const text = err instanceof Error ? err.message : '上传失败';
@@ -1131,7 +1135,26 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
       setUploading(false);
     }
   };
-  return <Modal title="上传录音" open={open} onCancel={uploading ? undefined : onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}><Upload.Dragger beforeUpload={() => false} maxCount={1} fileList={files} onChange={(info) => { setFiles(info.fileList); setUploadError(''); }} disabled={uploading}><p className="ant-upload-drag-icon"><InboxOutlined /></p><p>拖拽文件到此处，或点击选择文件</p><p>支持 mp3 / wav / m4a / aac / flac / ogg / wma，单文件最大 {limits.max_upload_size_mb}MB，时长上限 {limits.max_recording_duration_hours} 小时</p></Upload.Dragger>{progress > 0 && <Progress percent={progress} status={progress >= 100 ? 'success' : 'active'} />}{progress >= 100 && uploading && <Paragraph type="secondary">文件已上传，正在保存到云存储...</Paragraph>}{uploadError && <Text type="danger">{uploadError}</Text>}</Modal>;
+  return <Modal title="上传录音" open={open} onCancel={uploading ? undefined : onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}>
+    <Upload.Dragger beforeUpload={() => false} maxCount={1} fileList={files} onChange={(info) => { setFiles(info.fileList); setUploadError(''); }} disabled={uploading}>
+      <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+      <p>拖拽文件到此处，或点击选择文件</p>
+      <p>支持 mp3 / wav / m4a / aac / flac / ogg / wma，单文件最大 {limits.max_upload_size_mb}MB，时长上限 {limits.max_recording_duration_hours} 小时</p>
+    </Upload.Dragger>
+    <div className="upload-speaker-setting">
+      <Text strong>说话人数量</Text>
+      <Radio.Group value={speakerMode} onChange={(event) => setSpeakerMode(event.target.value)} disabled={uploading}>
+        <Radio.Button value="2">2</Radio.Button>
+        <Radio.Button value="3">3</Radio.Button>
+        <Radio.Button value="4">4</Radio.Button>
+        <Radio.Button value="auto">智能识别</Radio.Button>
+      </Radio.Group>
+      {speakerMode === 'auto' && <Text type="warning">该模式下识别时长会显著提升，请谨慎选择</Text>}
+    </div>
+    {progress > 0 && <Progress percent={progress} status={progress >= 100 ? 'success' : 'active'} />}
+    {progress >= 100 && uploading && <Paragraph type="secondary">文件已上传，正在保存到云存储...</Paragraph>}
+    {uploadError && <Text type="danger">{uploadError}</Text>}
+  </Modal>;
 }
 
 function postFormWithProgress(url: string, body: FormData, onProgress: (value: number) => void) {

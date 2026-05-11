@@ -38,6 +38,26 @@ app = FastAPI(title="AI ASR File MVP")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 ALLOWED_EXTENSIONS = {"mp3", "wav", "m4a", "aac", "flac", "ogg", "wma"}
+FIXED_SPEAKER_COUNTS = {2, 3, 4}
+
+
+def asr_speaker_metadata(value) -> dict:
+    raw = "" if value is None else str(value).strip().lower()
+    if raw in {"", "2"}:
+        count = 2
+    elif raw in {"auto", "smart", "0"}:
+        count = 0
+    else:
+        try:
+            count = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("SPEAKER_COUNT_INVALID") from exc
+        if count not in FIXED_SPEAKER_COUNTS:
+            raise ValueError("SPEAKER_COUNT_INVALID")
+    return {
+        "asr_speaker_count": count,
+        "asr_speaker_mode": "auto" if count == 0 else "fixed",
+    }
 
 
 @app.on_event("startup")
@@ -264,6 +284,10 @@ async def create_upload_session(project_id: str, payload: dict, db: Session = De
     max_duration_hours = basic_config.get("max_recording_duration_hours", settings.max_recording_duration_hours)
     if duration_seconds and duration_seconds > max_duration_hours * 3600:
         return fail("FILE_TOO_LONG", f"文件时长超过 {max_duration_hours} 小时")
+    try:
+        asr_speaker_metadata(payload.get("speaker_count"))
+    except ValueError:
+        return fail("VALIDATION_ERROR", "说话人数量仅支持 2、3、4 或智能识别")
     recording_id = new_id("rec")
     storage_config = resolve_storage_config(db)
     object_key = f"projects/{project_id}/recordings/{recording_id}/original.{extension}"
@@ -302,14 +326,18 @@ async def upload_complete(recording_id: str, payload: dict, db: Session = Depend
         return fail("RECORDING_NOT_FOUND", "录音不存在", status_code=404)
     recording.status = "queued"
     recording.file_size_bytes = int(payload.get("file_size_bytes") or recording.file_size_bytes)
-    job = create_job(db, recording.project_id, recording.id, "asr_transcription")
+    try:
+        metadata = asr_speaker_metadata(payload.get("speaker_count"))
+    except ValueError:
+        return fail("VALIDATION_ERROR", "说话人数量仅支持 2、3、4 或智能识别")
+    job = create_job(db, recording.project_id, recording.id, "asr_transcription", metadata)
     db.commit()
     enqueue_job(job.id)
     return ok({"recording_id": recording.id, "status": "queued", "job_id": job.id})
 
 
 @app.post("/api/recordings/{recording_id}/upload-content")
-def upload_recording_content(recording_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+def upload_recording_content(recording_id: str, file: UploadFile = File(...), speaker_count: str | None = Form(None), db: Session = Depends(get_db)):
     recording = db.get(Recording, recording_id)
     if not recording:
         return fail("RECORDING_NOT_FOUND", "录音不存在", status_code=404)
@@ -323,6 +351,10 @@ def upload_recording_content(recording_id: str, file: UploadFile = File(...), db
         recording.status = "failed"
         db.commit()
         return fail("FILE_TOO_LARGE", f"文件超过 {max_size_mb}M")
+    try:
+        metadata = asr_speaker_metadata(speaker_count)
+    except ValueError:
+        return fail("VALIDATION_ERROR", "说话人数量仅支持 2、3、4 或智能识别")
 
     try:
         storage.upload_fileobj(recording.object_key, file.file, file.content_type or recording.mime_type, storage.recording_config(recording))
@@ -338,7 +370,7 @@ def upload_recording_content(recording_id: str, file: UploadFile = File(...), db
     recording.status = "queued"
     recording.file_size_bytes = size
     recording.mime_type = file.content_type or recording.mime_type
-    job = create_job(db, recording.project_id, recording.id, "asr_transcription")
+    job = create_job(db, recording.project_id, recording.id, "asr_transcription", metadata)
     db.commit()
     enqueue_job(job.id)
     return ok({"recording_id": recording.id, "status": "queued", "job_id": job.id})
@@ -350,6 +382,7 @@ def upload_recording_proxy(
     file: UploadFile = File(...),
     duration_seconds: int = Form(0),
     template_type: str = Form("customer_interview"),
+    speaker_count: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     project = db.get(Project, project_id)
@@ -372,6 +405,10 @@ def upload_recording_proxy(
     max_duration_hours = basic_config.get("max_recording_duration_hours", settings.max_recording_duration_hours)
     if duration_seconds and duration_seconds > max_duration_hours * 3600:
         return fail("FILE_TOO_LONG", f"文件时长超过 {max_duration_hours} 小时")
+    try:
+        metadata = asr_speaker_metadata(speaker_count)
+    except ValueError:
+        return fail("VALIDATION_ERROR", "说话人数量仅支持 2、3、4 或智能识别")
 
     recording_id = new_id("rec")
     storage_config = resolve_storage_config(db)
@@ -402,7 +439,7 @@ def upload_recording_proxy(
         template_type=template_type or "customer_interview",
     )
     db.add(recording)
-    job = create_job(db, recording.project_id, recording.id, "asr_transcription")
+    job = create_job(db, recording.project_id, recording.id, "asr_transcription", metadata)
     db.commit()
     enqueue_job(job.id)
     return ok({"recording_id": recording.id, "object_key": object_key, "status": "queued", "job_id": job.id})

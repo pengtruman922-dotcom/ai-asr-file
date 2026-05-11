@@ -161,6 +161,10 @@ body { background: #f5f6f8; color: #1d2433; font-family: -apple-system, BlinkMac
 .player audio { width: 100%; }
 .player-hint { white-space: nowrap; font-size: 12px; }
 
+.upload-speaker-setting { margin-top: 14px; display: grid; gap: 8px; }
+.upload-speaker-setting .ant-radio-group { display: flex; flex-wrap: wrap; gap: 6px; }
+.upload-speaker-setting .ant-radio-button-wrapper { border-radius: 8px; border-inline-start-width: 1px; }
+
 /* ── QA ── */
 .qa-card { width: 100%; background: #fbfcff; }
 .qa-messages { display: grid; gap: 10px; max-height: 52vh; overflow-y: auto; padding-right: 4px; }

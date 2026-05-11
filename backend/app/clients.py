@@ -16,7 +16,7 @@ class ASRClient:
     def __init__(self):
         self.settings = get_settings()
 
-    def transcribe(self, audio_url: str, file_name: str, on_task_id: Callable[[str], None] | None = None, on_event: Callable[[str, dict], None] | None = None) -> list[dict]:
+    def transcribe(self, audio_url: str, file_name: str, speaker_count: int | None = None, on_task_id: Callable[[str], None] | None = None, on_event: Callable[[str, dict], None] | None = None) -> list[dict]:
         config = get_ai_config("asr")
         api_key = config.get("api_key", "")
         if self._use_local_mock(self.settings.asr_mock_enabled, api_key):
@@ -28,7 +28,7 @@ class ASRClient:
         submit_url = (config.get("url") or self.settings.asr_api_url).strip().rstrip("/")
         model = (config.get("model") or self.settings.asr_model).strip()
         self._emit_asr_event(on_event, "submit_start", {"model": model, "url": submit_url})
-        task_id = self._submit_task(submit_url, api_key, model, audio_url, on_event=on_event)
+        task_id = self._submit_task(submit_url, api_key, model, audio_url, speaker_count=speaker_count, on_event=on_event)
         if on_task_id:
             on_task_id(task_id)
         self._emit_asr_event(on_event, "task_id_received", {"task_id": task_id})
@@ -42,7 +42,8 @@ class ASRClient:
             raise RuntimeError("ASR_RESULT_EMPTY: 识别结果为空，请检查音频是否包含可识别语音。")
         return segments
 
-    def _submit_task(self, submit_url: str, api_key: str, model: str, audio_url: str, on_event: Callable[[str, dict], None] | None = None) -> str:
+    def _submit_task(self, submit_url: str, api_key: str, model: str, audio_url: str, speaker_count: int | None = None, on_event: Callable[[str, dict], None] | None = None) -> str:
+        speaker_count_value = self.settings.asr_speaker_count if speaker_count is None else int(speaker_count or 0)
         payload = {
             "model": model,
             "input": {"file_urls": [audio_url]},
@@ -54,8 +55,13 @@ class ASRClient:
         }
         if self.settings.asr_diarization_enabled:
             payload["parameters"]["diarization_enabled"] = True
-            if self.settings.asr_speaker_count > 0:
-                payload["parameters"]["speaker_count"] = self.settings.asr_speaker_count
+            if speaker_count_value > 0:
+                payload["parameters"]["speaker_count"] = speaker_count_value
+            self._emit_asr_event(
+                on_event,
+                "diarization_config",
+                {"speaker_count": speaker_count_value if speaker_count_value > 0 else None, "mode": "fixed" if speaker_count_value > 0 else "auto"},
+            )
         if model == "paraformer-v2":
             payload["parameters"]["language_hints"] = ["zh", "en"]
 
