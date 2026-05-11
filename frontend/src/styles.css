@@ -87,7 +87,7 @@ body { background: #f5f6f8; color: #1d2433; font-family: -apple-system, BlinkMac
 .resize-handle:hover::before, .resize-handle.active::before { background: #3b6fd4; box-shadow: 0 0 0 3px rgba(59,111,212,0.14); }
 .workspace-grid.resizing, body.is-resizing-columns { cursor: col-resize; user-select: none; }
 .panel-scroll { overflow-y: auto; }
-.panel-actions { margin-bottom: 14px; }
+.panel-actions { margin-bottom: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* ── Recording list ── */
 .recording { cursor: pointer; padding: 6px 4px !important; border-radius: 8px; transition: background 120ms; }
@@ -125,6 +125,9 @@ body { background: #f5f6f8; color: #1d2433; font-family: -apple-system, BlinkMac
 .segment-time { background: none; border: none; padding: 2px 6px; border-radius: 5px; font-size: 12px; color: #8492a6; cursor: pointer; font-family: inherit; transition: background 120ms, color 120ms; }
 .segment-time:hover { background: #f0f4fc; color: #3b6fd4; }
 .speaker-badge { display: inline-block; padding: 1px 8px; border-radius: 20px; background: #eef2fc; color: #3b6fd4; font-size: 11px; font-weight: 600; letter-spacing: 0.01em; }
+.speaker-badge-clickable { cursor: pointer; transition: background 120ms; }
+.speaker-badge-clickable:hover { background: #dce8fc; }
+.speaker-input { width: 100px; }
 .segment-text-row { display: flex; align-items: flex-start; gap: 8px; }
 .segment-text { flex: 1; font-size: 13.5px; line-height: 1.65; color: #2d3748; }
 .segment-edit-btn { flex-shrink: 0; padding: 0; font-size: 12px; opacity: 0; transition: opacity 120ms; }

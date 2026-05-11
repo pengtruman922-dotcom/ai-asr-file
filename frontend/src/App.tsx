@@ -9,6 +9,12 @@ import type { AiTestResult, AppSettings, Job, Project, QAMessage, QAThread, Reco
 const { Header, Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
 
+const STATUS_LABEL: Record<string, string> = {
+  uploaded: '已上传', pending: '排队中', queued: '排队中',
+  transcribing: '转写中', cleaning: '整理中', summarizing: '生成纪要',
+  processing: '处理中', completed: '已完成', failed: '失败'
+};
+
 const PROJECT_LAYOUT_STORAGE_KEY = 'ai_asr_project_layout_v1';
 const PROJECT_LAYOUT_DEFAULT = { left: 280, right: 380 };
 const LEFT_PANEL_MIN = 220;
@@ -45,18 +51,42 @@ function normalizeProjectColumnWidths(widths: ProjectColumnWidths, containerWidt
   return { left, right };
 }
 
+function parseHash(): { view: 'home' | 'project' | 'settings'; projectId: string | null } {
+  const hash = window.location.hash;
+  const match = hash.match(/^#\/project\/([^/]+)$/);
+  if (match) return { view: 'project', projectId: match[1] };
+  if (hash === '#/settings') return { view: 'settings', projectId: null };
+  return { view: 'home', projectId: null };
+}
+
 function App() {
   const [token, setTokenState] = useState(getToken());
-  const [view, setView] = useState<'home' | 'project' | 'settings'>('home');
-  const [projectId, setProjectId] = useState<string | null>(null);
+  const [{ view, projectId }, setNav] = useState(parseHash);
+
+  useEffect(() => {
+    const onHashChange = () => setNav(parseHash());
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  const navigate = (next: { view: 'home' | 'project' | 'settings'; projectId?: string }) => {
+    if (next.view === 'project' && next.projectId) {
+      window.location.hash = `#/project/${next.projectId}`;
+    } else if (next.view === 'settings') {
+      window.location.hash = '#/settings';
+    } else {
+      window.location.hash = '';
+    }
+    setNav({ view: next.view, projectId: next.projectId ?? null });
+  };
 
   if (!token) return <Login onLogin={(next) => { setToken(next); setTokenState(next); }} />;
 
   return (
     <Layout className="app-shell">
-      {view === 'home' && <Home onOpenProject={(id) => { setProjectId(id); setView('project'); }} onSettings={() => setView('settings')} onLogout={() => { clearToken(); setTokenState(''); }} />}
-      {view === 'project' && projectId && <ProjectPage projectId={projectId} onBack={() => setView('home')} />}
-      {view === 'settings' && <SettingsPage onBack={() => setView('home')} />}
+      {view === 'home' && <Home onOpenProject={(id) => navigate({ view: 'project', projectId: id })} onSettings={() => navigate({ view: 'settings' })} onLogout={() => { clearToken(); setTokenState(''); window.location.hash = ''; }} />}
+      {view === 'project' && projectId && <ProjectPage projectId={projectId} onBack={() => navigate({ view: 'home' })} />}
+      {view === 'settings' && <SettingsPage onBack={() => navigate({ view: 'home' })} />}
     </Layout>
   );
 }
@@ -409,6 +439,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const saveSegment = async (seg: TranscriptSegment) => {
     await api(`/api/transcript-segments/${seg.segment_id}`, { method: 'PATCH', body: JSON.stringify({ speaker: seg.speaker, text: seg.text }) });
     message.success('已保存，纪要已标记为过期');
+    void loadProject();
     void loadSelected();
   };
 
@@ -489,7 +520,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
                   <div className="recording-meta">
                     <span className={`status-dot-label status-${rec.status}`}>
                       <span className="status-dot" />
-                      {rec.status}
+                      {STATUS_LABEL[rec.status] ?? rec.status}
                     </span>
                     <span className="recording-duration">{formatDuration(rec.duration_seconds)}</span>
                   </div>
@@ -508,7 +539,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
               {selectedRecording && (
                 <span className={`status-dot-label status-${selectedRecording.status}`}>
                   <span className="status-dot" />
-                  {selectedRecording.status}
+                  {STATUS_LABEL[selectedRecording.status] ?? selectedRecording.status}
                 </span>
               )}
             </div>
@@ -550,29 +581,54 @@ function ColumnResizeHandle({ side, active, onPointerDown, onDoubleClick }: { si
 }
 
 function SegmentEditor({ segment, showRaw, onJump, onSave }: { segment: TranscriptSegment; showRaw: boolean; onJump: (ms: number) => void; onSave: (seg: TranscriptSegment) => void }) {
-  const [editing, setEditing] = useState(false);
+  const [editingText, setEditingText] = useState(false);
+  const [editingSpeaker, setEditingSpeaker] = useState(false);
   const [draft, setDraft] = useState(segment);
-  useEffect(() => setDraft(segment), [segment]);
+  useEffect(() => { setDraft(segment); setEditingText(false); setEditingSpeaker(false); }, [segment]);
+
+  const saveSpeaker = () => { setEditingSpeaker(false); onSave(draft); };
+  const saveText = () => { setEditingText(false); onSave(draft); };
+  const cancelSpeaker = () => { setEditingSpeaker(false); setDraft(segment); };
+  const cancelText = () => { setEditingText(false); setDraft(segment); };
+
   return (
     <div className="segment-card">
       <div className="segment-header">
         <button className="segment-time" onClick={() => onJump(segment.start_time_ms)}>{formatMs(segment.start_time_ms)}</button>
-        {!editing && <span className="speaker-badge">{segment.speaker}</span>}
+        {editingSpeaker ? (
+          <Space size={4}>
+            <Input
+              size="small"
+              className="speaker-input"
+              value={draft.speaker}
+              onChange={(e) => setDraft({ ...draft, speaker: e.target.value })}
+              onPressEnter={saveSpeaker}
+              autoFocus
+            />
+            <Button type="primary" size="small" onClick={saveSpeaker}>保存</Button>
+            <Button size="small" onClick={cancelSpeaker}>取消</Button>
+          </Space>
+        ) : (
+          <span className="speaker-badge speaker-badge-clickable" title="点击编辑发言人名称" onClick={() => setEditingSpeaker(true)}>{segment.speaker}</span>
+        )}
       </div>
       <div className="segment-body">
-        {editing ? (
+        {editingText ? (
           <Space direction="vertical" style={{ width: '100%' }}>
-            <Input value={draft.speaker} onChange={(e) => setDraft({ ...draft, speaker: e.target.value })} placeholder="发言人" />
-            <Input.TextArea rows={3} value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} />
+            <Input.TextArea
+              autoSize={{ minRows: 3 }}
+              value={draft.text}
+              onChange={(e) => setDraft({ ...draft, text: e.target.value })}
+            />
             <Space>
-              <Button type="primary" size="small" onClick={() => { setEditing(false); onSave(draft); }}>保存</Button>
-              <Button size="small" onClick={() => setEditing(false)}>取消</Button>
+              <Button type="primary" size="small" onClick={saveText}>保存</Button>
+              <Button size="small" onClick={cancelText}>取消</Button>
             </Space>
           </Space>
         ) : (
           <div className="segment-text-row">
             <Text className="segment-text">{segment.text}</Text>
-            <Button size="small" type="link" className="segment-edit-btn" onClick={() => setEditing(true)}>编辑</Button>
+            <Button size="small" type="link" className="segment-edit-btn" onClick={() => setEditingText(true)}>编辑</Button>
           </div>
         )}
         {showRaw && segment.raw_text && <Paragraph className="raw-text">{segment.raw_text}</Paragraph>}
