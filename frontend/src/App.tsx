@@ -205,11 +205,6 @@ function Home({ onOpenProject, onSettings, onLogout }: { onOpenProject: (id: str
             {projects.map((project) => (
               <div key={project.project_id} className="project-card" onClick={() => onOpenProject(project.project_id)}>
                 <div className="project-card-header">
-                  <div className="project-card-icon">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>
-                    </svg>
-                  </div>
                   <Dropdown menu={actionMenu(project)} trigger={['click']}>
                     <button className="project-card-more" onClick={(e) => e.stopPropagation()}>
                       <MoreOutlined />
