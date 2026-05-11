@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from threading import Lock
 
 from sqlalchemy import delete
 
@@ -24,7 +23,7 @@ from .utils import new_id
 
 def enqueue_job(job_id: str) -> None:
     settings = get_settings()
-    if settings.app_env == "local" and settings.queue_sync:
+    if settings.queue_sync:
         run_job(job_id)
         return
     from redis import Redis
@@ -65,12 +64,6 @@ def run_job(job_id: str) -> None:
             recording.status = "cleaning"
         elif recording and job.job_type == "summary_generation":
             recording.status = "summary_generating"
-        elif job.job_type == "qa_answer":
-            message_id = (job.metadata_json or {}).get("assistant_message_id")
-            if message_id:
-                message = session.get(QAMessage, message_id)
-                if message:
-                    message.status = "running"
 
     try:
         if job_type == "asr_transcription":
@@ -113,50 +106,16 @@ def retry_failed_job(job_id: str) -> str:
             raise ValueError("JOB_NOT_RETRYABLE")
         new = create_job(session, old.project_id, old.recording_id, old.job_type, old.metadata_json)
         new_id_value = new.id
-        if old.recording_id:
-            recording = session.get(Recording, old.recording_id)
-            if recording:
-                if old.job_type == "asr_transcription":
-                    recording.status = "queued"
-                elif old.job_type == "clean_transcript":
-                    recording.status = "asr_completed"
-                elif old.job_type == "summary_generation":
-                    recording.status = "cleaning_completed"
     enqueue_job(new_id_value)
     return new_id_value
 
 
 def _run_asr(job_id: str) -> None:
-    def record_asr_event(event: str, payload: dict | None = None) -> None:
-        with session_scope() as event_session:
-            task_job = event_session.get(ProcessingJob, job_id)
-            if not task_job:
-                return
-            metadata = dict(task_job.metadata_json or {})
-            diagnostics = dict(metadata.get("asr_diagnostics") or {})
-            events = list(diagnostics.get("events") or [])
-            event_payload = payload or {}
-            events.append(
-                {
-                    "event": event,
-                    "at": datetime.now(timezone.utc).isoformat(),
-                    "payload": event_payload,
-                }
-            )
-            diagnostics["events"] = events[-80:]
-            diagnostics["last_event"] = event
-            if event == "poll_status":
-                diagnostics["last_status"] = event_payload.get("status")
-                diagnostics["poll_count"] = event_payload.get("poll_count")
-            metadata["asr_diagnostics"] = diagnostics
-            task_job.metadata_json = metadata
-
     with session_scope() as session:
         job = session.get(ProcessingJob, job_id)
         recording = session.get(Recording, job.recording_id)
         audio_url = storage.create_download_url(recording.object_key, expires_in=24 * 3600, storage_config=storage.recording_config(recording))
         file_name = recording.file_name
-        job.metadata_json = {**(job.metadata_json or {}), "asr_file_name": file_name, "asr_file_size_bytes": recording.file_size_bytes}
 
     def save_external_task_id(task_id: str) -> None:
         with session_scope() as task_session:
@@ -165,8 +124,7 @@ def _run_asr(job_id: str) -> None:
                 task_job.external_task_id = task_id
                 task_job.metadata_json = {**(task_job.metadata_json or {}), "asr_task_id": task_id}
 
-    record_asr_event("download_url_created", {"file_name": file_name})
-    segments = asr_client.transcribe(audio_url, file_name, on_task_id=save_external_task_id, on_event=record_asr_event)
+    segments = asr_client.transcribe(audio_url, file_name, on_task_id=save_external_task_id)
 
     with session_scope() as session:
         job = session.get(ProcessingJob, job_id)
@@ -208,46 +166,6 @@ def _run_asr(job_id: str) -> None:
 
 
 def _run_clean(job_id: str) -> None:
-    event_lock = Lock()
-
-    def record_clean_event(event: str, payload: dict | None = None) -> None:
-        with event_lock:
-            with session_scope() as event_session:
-                task_job = event_session.get(ProcessingJob, job_id)
-                if not task_job:
-                    return
-                metadata = dict(task_job.metadata_json or {})
-                diagnostics = dict(metadata.get("clean_diagnostics") or {})
-                events = list(diagnostics.get("events") or [])
-                event_payload = payload or {}
-                events.append(
-                    {
-                        "event": event,
-                        "at": datetime.now(timezone.utc).isoformat(),
-                        "payload": event_payload,
-                    }
-                )
-                diagnostics["events"] = events[-120:]
-                diagnostics["last_event"] = event
-                if "batch_count" in event_payload:
-                    diagnostics["batch_count"] = event_payload.get("batch_count")
-                if event == "batch_plan":
-                    diagnostics["segment_count"] = event_payload.get("segment_count")
-                    diagnostics["max_workers"] = event_payload.get("max_workers")
-                    task_job.progress = max(task_job.progress or 0, 15)
-                elif event == "batch_completed":
-                    completed = int(diagnostics.get("completed_batches") or 0) + 1
-                    total = int(event_payload.get("batch_count") or diagnostics.get("batch_count") or completed)
-                    diagnostics["completed_batches"] = completed
-                    task_job.progress = min(95, 15 + int((completed / max(total, 1)) * 75))
-                elif event == "batch_failed":
-                    diagnostics["failed_batch_index"] = event_payload.get("batch_index")
-                    diagnostics["failed_error"] = event_payload.get("error")
-                elif event in {"mock_used", "all_batches_completed"}:
-                    task_job.progress = max(task_job.progress or 0, 95)
-                metadata["clean_diagnostics"] = diagnostics
-                task_job.metadata_json = metadata
-
     with session_scope() as session:
         job = session.get(ProcessingJob, job_id)
         recording = session.get(Recording, job.recording_id)
@@ -255,7 +173,7 @@ def _run_clean(job_id: str) -> None:
             {"id": seg.id, "speaker": seg.speaker, "start_time_ms": seg.start_time_ms, "end_time_ms": seg.end_time_ms, "text": seg.text}
             for seg in session.query(RawTranscriptSegment).filter_by(recording_id=recording.id).order_by(RawTranscriptSegment.start_time_ms).all()
         ]
-    cleaned = llm_client.clean_segments(raw, on_event=record_clean_event)
+    cleaned = llm_client.clean_segments(raw)
     with session_scope() as session:
         job = session.get(ProcessingJob, job_id)
         recording = session.get(Recording, job.recording_id)
@@ -351,7 +269,7 @@ def _run_qa(job_id: str) -> None:
         total_chars = 0
         for rec in recordings:
             segments = [
-                {"speaker": seg.speaker, "start_time_ms": seg.start_time_ms, "end_time_ms": seg.end_time_ms, "text": seg.text}
+                {"id": seg.id, "speaker": seg.speaker, "start_time_ms": seg.start_time_ms, "end_time_ms": seg.end_time_ms, "text": seg.text}
                 for seg in session.query(CleanTranscriptSegment).filter_by(recording_id=rec.id).order_by(CleanTranscriptSegment.start_time_ms).all()
             ]
             total_chars += sum(len(seg["text"]) for seg in segments)

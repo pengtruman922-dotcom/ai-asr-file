@@ -2,7 +2,6 @@ import json
 import re
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.parse import urlparse
 
@@ -16,33 +15,25 @@ class ASRClient:
     def __init__(self):
         self.settings = get_settings()
 
-    def transcribe(self, audio_url: str, file_name: str, on_task_id: Callable[[str], None] | None = None, on_event: Callable[[str, dict], None] | None = None) -> list[dict]:
+    def transcribe(self, audio_url: str, file_name: str, on_task_id: Callable[[str], None] | None = None) -> list[dict]:
         config = get_ai_config("asr")
         api_key = config.get("api_key", "")
-        if self._use_local_mock(self.settings.asr_mock_enabled, api_key):
-            self._emit_asr_event(on_event, "mock_used", {"file_name": file_name})
+        if self.settings.asr_mock_enabled or not api_key:
             return self._mock_segments(file_name)
-        if not api_key:
-            raise RuntimeError("ASR_API_KEY_MISSING: 请先在系统设置中配置 ASR API Key，或在 Railway 变量中配置 ASR_API_KEY。")
 
         submit_url = (config.get("url") or self.settings.asr_api_url).strip().rstrip("/")
         model = (config.get("model") or self.settings.asr_model).strip()
-        self._emit_asr_event(on_event, "submit_start", {"model": model, "url": submit_url})
-        task_id = self._submit_task(submit_url, api_key, model, audio_url, on_event=on_event)
+        task_id = self._submit_task(submit_url, api_key, model, audio_url)
         if on_task_id:
             on_task_id(task_id)
-        self._emit_asr_event(on_event, "task_id_received", {"task_id": task_id})
-        result_url = self._wait_for_result(submit_url, api_key, task_id, on_event=on_event)
-        self._emit_asr_event(on_event, "result_download_start", {"task_id": task_id})
+        result_url = self._wait_for_result(submit_url, api_key, task_id)
         result = self._download_transcription_result(result_url)
-        self._emit_asr_event(on_event, "result_download_complete", {"task_id": task_id})
         segments = self._parse_transcription_result(result)
-        self._emit_asr_event(on_event, "parse_complete", {"task_id": task_id, "segment_count": len(segments)})
         if not segments:
             raise RuntimeError("ASR_RESULT_EMPTY: 识别结果为空，请检查音频是否包含可识别语音。")
         return segments
 
-    def _submit_task(self, submit_url: str, api_key: str, model: str, audio_url: str, on_event: Callable[[str, dict], None] | None = None) -> str:
+    def _submit_task(self, submit_url: str, api_key: str, model: str, audio_url: str) -> str:
         payload = {
             "model": model,
             "input": {"file_urls": [audio_url]},
@@ -52,14 +43,9 @@ class ASRClient:
                 "timestamp_alignment_enabled": True,
             },
         }
-        if self.settings.asr_diarization_enabled:
-            payload["parameters"]["diarization_enabled"] = True
-            if self.settings.asr_speaker_count > 0:
-                payload["parameters"]["speaker_count"] = self.settings.asr_speaker_count
         if model == "paraformer-v2":
             payload["parameters"]["language_hints"] = ["zh", "en"]
 
-        start = time.monotonic()
         response = requests.post(
             submit_url,
             headers={
@@ -75,18 +61,13 @@ class ASRClient:
         task_id = data.get("output", {}).get("task_id") or data.get("task_id")
         if not task_id:
             raise RuntimeError(f"ASR_SUBMIT_FAILED: 未返回 task_id，响应={self._compact_json(data)}")
-        self._emit_asr_event(on_event, "submit_complete", {"task_id": str(task_id), "elapsed_ms": int((time.monotonic() - start) * 1000)})
         return str(task_id)
 
-    def _wait_for_result(self, submit_url: str, api_key: str, task_id: str, on_event: Callable[[str, dict], None] | None = None) -> str:
+    def _wait_for_result(self, submit_url: str, api_key: str, task_id: str) -> str:
         task_url = self._task_url(submit_url, task_id)
         deadline = time.monotonic() + self.settings.asr_poll_timeout_seconds
         last_payload: dict[str, Any] | None = None
-        poll_count = 0
-        self._emit_asr_event(on_event, "poll_start", {"task_id": task_id, "interval_seconds": self.settings.asr_poll_interval_seconds})
         while time.monotonic() < deadline:
-            poll_count += 1
-            poll_started = time.monotonic()
             response = requests.post(
                 task_url,
                 headers={
@@ -101,16 +82,9 @@ class ASRClient:
             last_payload = payload
             output = payload.get("output") if isinstance(payload.get("output"), dict) else payload
             status = str(output.get("task_status") or output.get("status") or "").upper()
-            self._emit_asr_event(
-                on_event,
-                "poll_status",
-                {"task_id": task_id, "poll_count": poll_count, "status": status or "UNKNOWN", "elapsed_ms": int((time.monotonic() - poll_started) * 1000)},
-            )
 
             if status == "SUCCEEDED":
-                result_url = self._extract_transcription_url(output)
-                self._emit_asr_event(on_event, "result_url_received", {"task_id": task_id, "poll_count": poll_count})
-                return result_url
+                return self._extract_transcription_url(output)
             if status in {"FAILED", "CANCELED", "CANCELLED"}:
                 message = output.get("message") or payload.get("message") or self._compact_json(output)
                 raise RuntimeError(f"ASR_TASK_FAILED: task_id={task_id}, status={status}, message={message}")
@@ -120,14 +94,6 @@ class ASRClient:
             time.sleep(self.settings.asr_poll_interval_seconds)
 
         raise RuntimeError(f"ASR_TASK_TIMEOUT: task_id={task_id}, last_response={self._compact_json(last_payload or {})}")
-
-    def _emit_asr_event(self, callback: Callable[[str, dict], None] | None, event: str, payload: dict | None = None) -> None:
-        if not callback:
-            return
-        try:
-            callback(event, payload or {})
-        except Exception:
-            pass
 
     def _extract_transcription_url(self, output: dict) -> str:
         results = output.get("results") or []
@@ -231,12 +197,12 @@ class ASRClient:
             if item.get(key):
                 return str(item[key])
         if item.get("speaker_id") is not None:
-            return f"发言人{int(item['speaker_id']) + 1}" if str(item["speaker_id"]).isdigit() else f"发言人{item['speaker_id']}"
+            return f"说话人{int(item['speaker_id']) + 1}" if str(item["speaker_id"]).isdigit() else f"说话人{item['speaker_id']}"
         if channel_id is not None:
-            return "发言人1"
+            return f"声道{channel_id}"
         if item.get("channel_id") is not None:
-            return "发言人1"
-        return "发言人"
+            return f"声道{item['channel_id']}"
+        return "说话人"
 
     def _confidence(self, item: dict) -> float | None:
         value = item.get("confidence", item.get("score"))
@@ -278,9 +244,6 @@ class ASRClient:
 
     def _compact_json(self, payload: Any) -> str:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))[:1200]
-
-    def _use_local_mock(self, mock_enabled: bool, api_key: str) -> bool:
-        return self.settings.app_env == "local" and mock_enabled and not api_key
 
     def _mock_segments(self, file_name: str) -> list[dict]:
         topic = file_name.rsplit(".", 1)[0]
@@ -327,11 +290,10 @@ class LLMClient:
     def __init__(self):
         self.settings = get_settings()
 
-    def clean_segments(self, raw_segments: list[dict], on_event: Callable[[str, dict], None] | None = None) -> list[dict]:
+    def clean_segments(self, raw_segments: list[dict]) -> list[dict]:
         config = get_ai_config("clean")
         api_key = config.get("api_key", "")
-        if self._use_local_mock(self.settings.llm_mock_enabled, api_key):
-            self._emit_clean_event(on_event, "mock_used", {"segment_count": len(raw_segments)})
+        if self.settings.llm_mock_enabled or not api_key:
             return [
                 {
                     "raw_segment_id": item["id"],
@@ -342,80 +304,14 @@ class LLMClient:
                 }
                 for item in raw_segments
             ]
-        if not api_key:
-            raise RuntimeError("LLM_API_KEY_MISSING: 请先在系统设置中配置清洁稿模型 API Key。")
-
-        batches = self._split_clean_batches(raw_segments)
-        batch_count = len(batches)
-        if batch_count == 0:
-            return []
-        max_workers = max(1, min(self.settings.llm_clean_batch_concurrency, batch_count))
-        self._emit_clean_event(
-            on_event,
-            "batch_plan",
-            {
-                "segment_count": len(raw_segments),
-                "batch_count": batch_count,
-                "max_workers": max_workers,
-                "max_segments": self.settings.llm_clean_batch_max_segments,
-                "max_chars": self.settings.llm_clean_batch_max_chars,
-            },
-        )
-
-        results: list[list[dict] | None] = [None] * batch_count
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {}
-            for index, batch in enumerate(batches, start=1):
-                self._emit_clean_event(on_event, "batch_submitted", self._clean_batch_payload(index, batch_count, batch))
-                future = executor.submit(self._clean_segment_batch, config, api_key, batch, index, batch_count)
-                future_map[future] = (index, batch)
-            for future in as_completed(future_map):
-                index, batch = future_map[future]
-                try:
-                    results[index - 1] = future.result()
-                except Exception as exc:
-                    self._emit_clean_event(on_event, "batch_failed", {**self._clean_batch_payload(index, batch_count, batch), "error": str(exc)})
-                    raise RuntimeError(f"LLM_CLEAN_BATCH_FAILED: 第 {index}/{batch_count} 批清洁稿生成失败：{exc}") from exc
-                self._emit_clean_event(on_event, "batch_completed", self._clean_batch_payload(index, batch_count, batch))
-
-        cleaned = [item for batch_result in results for item in (batch_result or [])]
-        self._emit_clean_event(on_event, "all_batches_completed", {"batch_count": batch_count, "segment_count": len(cleaned)})
-        return cleaned
-
-    def _split_clean_batches(self, raw_segments: list[dict]) -> list[list[dict]]:
-        batches: list[list[dict]] = []
-        current: list[dict] = []
-        current_chars = 0
-        max_segments = max(1, self.settings.llm_clean_batch_max_segments)
-        max_chars = max(1000, self.settings.llm_clean_batch_max_chars)
-        for segment in raw_segments:
-            segment_chars = len(str(segment.get("text") or ""))
-            should_flush = current and (len(current) >= max_segments or current_chars + segment_chars > max_chars)
-            if should_flush:
-                batches.append(current)
-                current = []
-                current_chars = 0
-            current.append(segment)
-            current_chars += segment_chars
-        if current:
-            batches.append(current)
-        return batches
-
-    def _clean_segment_batch(self, config: dict, api_key: str, raw_segments: list[dict], batch_index: int, batch_count: int) -> list[dict]:
         content = self._chat_json(
             config.get("url", self.settings.llm_clean_base_url),
             api_key,
             config.get("model", self.settings.llm_clean_model),
-            "你是咨询访谈转写清洁助手。请修正明显错别字、标点和断句，保留原意、说话人、时间戳，不要扩写、合并或删除段落。只返回 JSON。",
+            "你是咨询访谈转写清洁助手。请修正明显错别字、标点和断句，保留原意、说话人、时间戳，不要扩写。只返回 JSON。",
             json.dumps(
                 {
                     "task": "clean_transcript_segments",
-                    "batch": {"index": batch_index, "total": batch_count},
-                    "rules": [
-                        "返回 segments 数组，数量和输入 segments 保持一致",
-                        "每个输出段落必须保留对应 raw_segment_id、speaker、start_time_ms、end_time_ms",
-                        "clean_text 只做可读性清洁，不要总结、扩写或改变原意",
-                    ],
                     "output_schema": {
                         "segments": [
                             {
@@ -433,29 +329,16 @@ class LLMClient:
             ),
         )
         data = self._loads_json(content)
-        segments = data.get("segments") if isinstance(data, dict) else data
+        segments = data.get("segments") if isinstance(data, dict) else None
         if not isinstance(segments, list):
             raise RuntimeError("LLM_CLEAN_INVALID_JSON: 清洁稿模型未返回 segments 数组。")
-        return self._normalize_clean_segments(raw_segments, segments)
-
-    def _normalize_clean_segments(self, raw_segments: list[dict], segments: list) -> list[dict]:
         cleaned = []
         raw_by_id = {item["id"]: item for item in raw_segments}
-        parsed_by_id: dict[str, dict] = {}
-        parsed_by_index: dict[int, dict] = {}
         for index, item in enumerate(segments):
             if not isinstance(item, dict):
                 continue
             raw_id = item.get("raw_segment_id") or item.get("id") or (raw_segments[index]["id"] if index < len(raw_segments) else None)
-            if raw_id:
-                parsed_by_id[str(raw_id)] = item
-            parsed_by_index[index] = item
-
-        for index, raw in enumerate(raw_segments):
-            item = parsed_by_id.get(str(raw["id"])) or parsed_by_index.get(index) or {}
-            raw_id = item.get("raw_segment_id") or item.get("id") or raw["id"]
-            if raw_id not in raw_by_id:
-                raw_id = raw["id"]
+            raw = raw_by_id.get(raw_id) or (raw_segments[index] if index < len(raw_segments) else {})
             cleaned.append(
                 {
                     "raw_segment_id": raw_id,
@@ -467,22 +350,10 @@ class LLMClient:
             )
         return cleaned
 
-    def _clean_batch_payload(self, batch_index: int, batch_count: int, batch: list[dict]) -> dict:
-        return {
-            "batch_index": batch_index,
-            "batch_count": batch_count,
-            "segment_count": len(batch),
-            "char_count": sum(len(str(item.get("text") or "")) for item in batch),
-        }
-
-    def _emit_clean_event(self, on_event: Callable[[str, dict], None] | None, event: str, payload: dict | None = None) -> None:
-        if on_event:
-            on_event(event, payload or {})
-
     def summarize(self, clean_segments: list[dict], template_type: str) -> dict:
         config = get_ai_config("summary")
         api_key = config.get("api_key", "")
-        if self._use_local_mock(self.settings.llm_mock_enabled, api_key):
+        if self.settings.llm_mock_enabled or not api_key:
             quotes = [
                 {
                     "quote": item["text"],
@@ -524,8 +395,6 @@ class LLMClient:
 {quote_lines}
 """
             return {"format": "markdown", "markdown": markdown.strip(), "report_quotes": quotes}
-        if not api_key:
-            raise RuntimeError("LLM_API_KEY_MISSING: 请先在系统设置中配置纪要模型 API Key。")
 
         prompt = json.dumps({"template_type": template_type, "segments": clean_segments}, ensure_ascii=False)
         content = self._chat_plain(
@@ -540,89 +409,65 @@ class LLMClient:
     def answer(self, question: str, materials: list[dict], history: list[dict] | None = None) -> dict:
         config = get_ai_config("qa")
         api_key = config.get("api_key", "")
-        if self._use_local_mock(self.settings.llm_mock_enabled, api_key):
+        if self.settings.llm_mock_enabled or not api_key:
+            sources = []
+            for material in materials:
+                for seg in material["segments"]:
+                    if seg["speaker"] in {"客户", "专家", "内部受访人", "说话人", "说话人1", "说话人2"}:
+                        sources.append(
+                            {
+                                "recording_id": material["recording_id"],
+                                "file_name": material["file_name"],
+                                "segment_id": seg["id"],
+                                "start_time_ms": seg["start_time_ms"],
+                                "end_time_ms": seg["end_time_ms"],
+                                "quote": seg["text"],
+                            }
+                        )
+                        break
             return {
-                "answer": "这是本地模拟回答：请优先参考已选文件内容回答用户问题，并在引用材料时注明文件名和时间点。",
-                "answer_markdown": "这是本地模拟回答：请优先参考已选文件内容回答用户问题，并在引用材料时注明文件名和时间点。",
-                "sources": [],
+                "answer": "基于已选访谈，客户的核心需求集中在统一数据口径、建立数据治理责任机制、降低跨部门协同成本，并在系统建设前先推动管理机制达成一致。",
+                "answer_markdown": "客户的核心需求可以归纳为三类：\n\n1. **统一数据口径**：客户认为当前开会经常先争数据口径。\n2. **建立治理机制**：需要先明确关键指标和责任机制。\n3. **降低跨部门协同成本**：系统建设需要配合流程和组织调整。",
+                "key_points": [
+                    {"title": "统一数据口径", "detail": "客户认为当前开会经常先争数据口径。", "sources": sources[:1]},
+                    {"title": "组织流程配合", "detail": "客户担心业务部门不愿意改变现有流程。", "sources": sources[1:2] or sources[:1]},
+                ],
+                "sources": sources,
+                "uncertainties": [],
             }
-        if not api_key:
-            raise RuntimeError("LLM_API_KEY_MISSING: 请先在系统设置中配置问答模型 API Key。")
-        system, prompt = self._qa_prompt(question, materials, history)
-        content = self._chat_plain(
-            config.get("url", self.settings.llm_qa_base_url),
-            api_key,
-            config.get("model", self.settings.llm_qa_model),
-            system,
-            prompt,
-        )
-        return self._sanitize_qa_output({"answer": content.strip(), "answer_markdown": content.strip(), "sources": []})
-
-    def answer_stream(self, question: str, materials: list[dict], history: list[dict] | None = None) -> Any:
-        config = get_ai_config("qa")
-        api_key = config.get("api_key", "")
-        if self._use_local_mock(self.settings.llm_mock_enabled, api_key):
-            mock_text = "这是本地模拟回答：我会优先参考已选文件内容和最近对话上下文；引用材料时会注明文件名和时间点。"
-            for piece in self._chunk_text(mock_text, 12):
-                yield {"type": "content", "delta": piece}
-            return
-        if not api_key:
-            raise RuntimeError("LLM_API_KEY_MISSING: 请先在系统设置中配置问答模型 API Key。")
-        system, prompt = self._qa_prompt(question, materials, history)
-        yield from self._chat_stream(
-            config.get("url", self.settings.llm_qa_base_url),
-            api_key,
-            config.get("model", self.settings.llm_qa_model),
-            system,
-            prompt,
-        )
-
-    def _qa_prompt(self, question: str, materials: list[dict], history: list[dict] | None = None) -> tuple[str, str]:
-        prompt_materials = [{"file_name": item.get("file_name", ""), "segments": item.get("segments", [])} for item in materials]
-        system = "请回答用户问题。优先参考给定文件内容和最近对话上下文；不要编造文件中没有的事实；引用文件内容时注明来源文件名和时间点；如果资料不足，请直接说明。不要输出内部ID。"
         prompt = json.dumps(
             {
                 "question": question,
-                "materials": prompt_materials,
+                "materials": materials,
                 "recent_history": history or [],
+                "output_schema": {
+                    "answer_markdown": "Markdown 回答",
+                    "sources": [
+                        {
+                            "recording_id": "录音 id",
+                            "file_name": "文件名",
+                            "segment_id": "段落 id",
+                            "start_time_ms": 0,
+                            "end_time_ms": 0,
+                            "quote": "可引用原文",
+                        }
+                    ],
+                    "uncertainties": ["无法从材料确认的事项"],
+                },
             },
             ensure_ascii=False,
         )
-        return system, prompt
-
-    def _chunk_text(self, text: str, size: int) -> list[str]:
-        return [text[index : index + size] for index in range(0, len(text), size)]
-
-    def _sanitize_qa_output(self, data: dict) -> dict:
-        for key in ("answer", "answer_markdown"):
-            if isinstance(data.get(key), str):
-                data[key] = self._strip_internal_ids(data[key])
-        data["sources"] = self._sanitize_sources(data.get("sources") or [])
-        for point in data.get("key_points") or []:
-            if isinstance(point, dict):
-                if isinstance(point.get("detail"), str):
-                    point["detail"] = self._strip_internal_ids(point["detail"])
-                point["sources"] = self._sanitize_sources(point.get("sources") or [])
+        content = self._chat_json(
+            config.get("url", self.settings.llm_qa_base_url),
+            api_key,
+            config.get("model", self.settings.llm_qa_model),
+            "你是咨询顾问的项目资料分析助手。必须严格基于给定访谈材料回答，优先给出可用于报告或需求分析的结论，并附来源引用。只返回 JSON。",
+            prompt,
+        )
+        data = self._loads_json(content)
+        if not isinstance(data, dict):
+            raise RuntimeError("LLM_QA_INVALID_JSON: 问答模型未返回 JSON 对象。")
         return data
-
-    def _sanitize_sources(self, sources: list) -> list:
-        cleaned = []
-        for source in sources:
-            if not isinstance(source, dict):
-                continue
-            cleaned.append(
-                {
-                    "recording_id": source.get("recording_id", ""),
-                    "file_name": source.get("file_name", ""),
-                    "start_time_ms": source.get("start_time_ms", 0),
-                    "end_time_ms": source.get("end_time_ms", 0),
-                    "quote": self._strip_internal_ids(str(source.get("quote", ""))),
-                }
-            )
-        return cleaned
-
-    def _strip_internal_ids(self, text: str) -> str:
-        return re.sub(r"[\s\(（\[]*seg_[0-9A-Za-z_-]+[\)）\]]*", "", text)
 
     def _chat_json(self, base_url: str, api_key: str, model: str, system: str, user: str) -> str:
         try:
@@ -659,74 +504,11 @@ class LLMClient:
         data = response.json()
         return data["choices"][0]["message"]["content"]
 
-    def _chat_stream(self, base_url: str, api_key: str, model: str, system: str, user: str) -> Any:
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "temperature": 0.2,
-            "stream": True,
-        }
-        with requests.post(
-            self._chat_endpoint(base_url),
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=self.settings.llm_timeout_seconds,
-            stream=True,
-        ) as response:
-            try:
-                response.raise_for_status()
-            except requests.HTTPError as exc:
-                message = self._safe_response_text(response)
-                raise requests.HTTPError(f"LLM_CALL_FAILED: HTTP {response.status_code}, {message}", response=response) from exc
-            for line in response.iter_lines(decode_unicode=True):
-                if not line:
-                    continue
-                if isinstance(line, bytes):
-                    line = line.decode("utf-8", errors="ignore")
-                line = line.strip()
-                if not line.startswith("data:"):
-                    continue
-                raw = line.removeprefix("data:").strip()
-                if raw == "[DONE]":
-                    break
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                choices = data.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or choices[0].get("message") or {}
-                reasoning = self._delta_to_text(delta.get("reasoning_content") or delta.get("reasoning"))
-                content = self._delta_to_text(delta.get("content"))
-                if reasoning:
-                    yield {"type": "reasoning", "delta": reasoning}
-                if content:
-                    yield {"type": "content", "delta": content}
-
-    def _delta_to_text(self, value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        if isinstance(value, list):
-            parts = []
-            for item in value:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    parts.append(str(item.get("text") or item.get("content") or ""))
-            return "".join(parts)
-        return str(value)
-
     def _chat_endpoint(self, base_url: str) -> str:
         endpoint = (base_url or self.settings.llm_clean_base_url).strip().rstrip("/")
         if endpoint.endswith("/chat/completions"):
             return endpoint
         return endpoint + "/chat/completions"
-
-    def _use_local_mock(self, mock_enabled: bool, api_key: str) -> bool:
-        return self.settings.app_env == "local" and mock_enabled and not api_key
 
     def _loads_json(self, content: str) -> Any:
         content = content.strip()

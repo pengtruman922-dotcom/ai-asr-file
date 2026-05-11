@@ -24,29 +24,17 @@ class StorageService:
         config = dict(get_storage_config() or {})
         if storage_config:
             config.update(storage_config)
-
-        if self.settings.app_env != "local" and config.get("provider") == "local":
-            config["provider"] = "railway_bucket"
-        if not config.get("provider"):
-            config["provider"] = self.settings.storage_provider
-        if not config.get("bucket_name"):
-            config["bucket_name"] = self.settings.bucket or self.settings.railway_bucket_name
-        if not config.get("endpoint"):
-            config["endpoint"] = self.settings.endpoint or self.settings.railway_bucket_endpoint
-        if not config.get("region"):
-            config["region"] = self.settings.region or self.settings.railway_bucket_region
-        if not config.get("access_key_id"):
-            config["access_key_id"] = self.settings.access_key_id or self.settings.railway_bucket_access_key_id
-        if not config.get("secret_access_key"):
-            config["secret_access_key"] = self.settings.secret_access_key or self.settings.railway_bucket_secret_access_key
-        if not config.get("path_prefix"):
-            config["path_prefix"] = self.settings.storage_path_prefix
-        if not config.get("addressing_style"):
-            config["addressing_style"] = self.settings.storage_addressing_style
+        config.setdefault("provider", self.settings.storage_provider)
+        config.setdefault("bucket_name", self.settings.railway_bucket_name)
+        config.setdefault("endpoint", self.settings.railway_bucket_endpoint)
+        config.setdefault("region", self.settings.railway_bucket_region)
+        config.setdefault("access_key_id", self.settings.railway_bucket_access_key_id)
+        config.setdefault("secret_access_key", self.settings.railway_bucket_secret_access_key)
+        config.setdefault("path_prefix", self.settings.storage_path_prefix)
         return config
 
     def _is_local(self, storage_config: dict | None = None) -> bool:
-        return self.settings.app_env == "local" and self._effective_config(storage_config).get("provider") == "local"
+        return self._effective_config(storage_config).get("provider") == "local"
 
     def _full_key(self, object_key: str, storage_config: dict | None = None) -> str:
         config = self._effective_config(storage_config)
@@ -73,7 +61,6 @@ class StorageService:
                 "expires_in_seconds": 3600,
             }
         config = self._effective_config(storage_config)
-        self._validate_remote_config(config)
         client = self._s3_client(config)
         url = client.generate_presigned_url(
             ClientMethod="put_object",
@@ -82,31 +69,11 @@ class StorageService:
         )
         return {"method": "PUT", "url": url, "headers": {"Content-Type": content_type}, "expires_in_seconds": 3600}
 
-    def upload_fileobj(self, object_key: str, file_obj, content_type: str, storage_config: dict | None = None) -> None:
-        full_key = self._full_key(object_key, storage_config)
-        file_obj.seek(0)
-        if self._is_local(storage_config):
-            path = self._local_path(full_key)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("wb") as target:
-                shutil.copyfileobj(file_obj, target, length=1024 * 1024)
-            return
-        config = self._effective_config(storage_config)
-        self._validate_remote_config(config)
-        client = self._s3_client(config)
-        client.upload_fileobj(
-            file_obj,
-            config["bucket_name"],
-            full_key,
-            ExtraArgs={"ContentType": content_type or "application/octet-stream"},
-        )
-
     def create_download_url(self, object_key: str, expires_in: int = 3600, storage_config: dict | None = None):
         full_key = self._full_key(object_key, storage_config)
         if self._is_local(storage_config):
             return f"{self.settings.app_base_url}/api/mock-storage/{full_key}"
         config = self._effective_config(storage_config)
-        self._validate_remote_config(config)
         client = self._s3_client(config)
         return client.generate_presigned_url(
             ClientMethod="get_object",
@@ -128,7 +95,6 @@ class StorageService:
             path.write_text(content, encoding="utf-8")
             return
         config = self._effective_config(storage_config)
-        self._validate_remote_config(config)
         client = self._s3_client(config)
         client.put_object(
             Bucket=config["bucket_name"],
@@ -153,7 +119,6 @@ class StorageService:
                         item.unlink(missing_ok=True)
             return
         config = self._effective_config(storage_config)
-        self._validate_remote_config(config)
         client = self._s3_client(config)
         paginator = client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=config["bucket_name"], Prefix=full_prefix):
@@ -164,10 +129,12 @@ class StorageService:
     def test_connection(self, storage_config: dict | None = None) -> dict:
         config = self._effective_config(storage_config)
         provider = config.get("provider") or "local"
-        if provider == "local" and self.settings.app_env == "local":
+        if provider == "local":
             self.local_root.mkdir(parents=True, exist_ok=True)
             return {"status": "passed", "message": f"本地存储可用：{self.local_root}"}
-        self._validate_remote_config(config)
+        missing = [field for field in ["endpoint", "bucket_name", "access_key_id", "secret_access_key"] if not config.get(field)]
+        if missing:
+            raise ValueError("存储配置不完整：" + ", ".join(missing))
         client = self._s3_client(config)
         key = self._full_key(f"_healthchecks/{uuid.uuid4().hex}.txt", config)
         bucket = config["bucket_name"]
@@ -175,15 +142,6 @@ class StorageService:
         client.head_object(Bucket=bucket, Key=key)
         client.delete_object(Bucket=bucket, Key=key)
         return {"status": "passed", "message": "Bucket 连接成功，已完成写入/读取/删除测试"}
-
-    def _validate_remote_config(self, config: dict) -> None:
-        missing = [field for field in ["endpoint", "bucket_name", "access_key_id", "secret_access_key"] if not config.get(field)]
-        if missing:
-            raise RuntimeError(
-                "STORAGE_CONFIG_MISSING: Railway Bucket 配置不完整，缺少 "
-                + ", ".join(missing)
-                + "。请确认 Web/Worker 服务已引用 Bucket 变量，或在系统设置中保存 Bucket 配置。"
-            )
 
     def _s3_client(self, storage_config: dict | None = None):
         config = self._effective_config(storage_config)
@@ -193,7 +151,7 @@ class StorageService:
             aws_access_key_id=config.get("access_key_id"),
             aws_secret_access_key=config.get("secret_access_key"),
             region_name=config.get("region") or "auto",
-            config=Config(signature_version="s3v4", s3={"addressing_style": config.get("addressing_style") or "virtual"}),
+            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
         )
 
 

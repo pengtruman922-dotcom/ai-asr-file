@@ -16,18 +16,6 @@ export type Recording = {
   file_size_bytes: number;
   template_type: string;
   summary_stale: boolean;
-  created_at?: string;
-  updated_at?: string;
-  current_job_type?: string;
-  current_job_status?: string;
-  current_job_progress?: number;
-  current_job_created_at?: string;
-  current_job_started_at?: string;
-  latest_failed_job_id?: string;
-  latest_failed_job_type?: string;
-  latest_failed_job_error_code?: string;
-  latest_failed_job_error_message?: string;
-  latest_failed_job_finished_at?: string;
 };
 
 export type TranscriptSegment = {
@@ -47,13 +35,8 @@ export type Job = {
   job_type: string;
   status: string;
   progress: number;
-  external_task_id?: string;
-  metadata?: Record<string, unknown>;
   error_code?: string;
   error_message?: string;
-  created_at?: string;
-  started_at?: string;
-  finished_at?: string;
 };
 
 export type QAItem = {
@@ -81,7 +64,6 @@ export type QAMessage = {
   thread_id: string;
   role: 'user' | 'assistant';
   content: string;
-  reasoning_content?: string;
   selected_recording_ids: string[];
   sources: Array<{ file_name: string; start_time_ms: number; quote: string }>;
   status: string;

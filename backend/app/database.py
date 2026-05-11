@@ -37,32 +37,23 @@ def init_db() -> None:
 
 def ensure_compatibility_schema() -> None:
     inspector = inspect(engine)
-    table_names = inspector.get_table_names()
-    if "recordings" in table_names:
-        existing = {column["name"] for column in inspector.get_columns("recordings")}
-        required = {
-            "storage_config_id": "VARCHAR(64) DEFAULT 'default'",
-            "storage_provider": "VARCHAR(64) DEFAULT ''",
-            "storage_bucket_name": "VARCHAR(255) DEFAULT ''",
-            "storage_endpoint": "VARCHAR(1024) DEFAULT ''",
-            "storage_region": "VARCHAR(128) DEFAULT ''",
-            "storage_path_prefix": "VARCHAR(512) DEFAULT ''",
-        }
-        missing = [(name, ddl) for name, ddl in required.items() if name not in existing]
-        if missing:
-            with engine.begin() as connection:
-                for name, ddl in missing:
-                    connection.execute(text(f"ALTER TABLE recordings ADD COLUMN {name} {ddl}"))
-    if "qa_messages" in table_names:
-        existing_qa = {column["name"] for column in inspector.get_columns("qa_messages")}
-        qa_required = {
-            "reasoning_content": "TEXT DEFAULT ''",
-        }
-        qa_missing = [(name, ddl) for name, ddl in qa_required.items() if name not in existing_qa]
-        if qa_missing:
-            with engine.begin() as connection:
-                for name, ddl in qa_missing:
-                    connection.execute(text(f"ALTER TABLE qa_messages ADD COLUMN {name} {ddl}"))
+    if "recordings" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("recordings")}
+    required = {
+        "storage_config_id": "VARCHAR(64) DEFAULT 'default'",
+        "storage_provider": "VARCHAR(64) DEFAULT ''",
+        "storage_bucket_name": "VARCHAR(255) DEFAULT ''",
+        "storage_endpoint": "VARCHAR(1024) DEFAULT ''",
+        "storage_region": "VARCHAR(128) DEFAULT ''",
+        "storage_path_prefix": "VARCHAR(512) DEFAULT ''",
+    }
+    missing = [(name, ddl) for name, ddl in required.items() if name not in existing]
+    if not missing:
+        return
+    with engine.begin() as connection:
+        for name, ddl in missing:
+            connection.execute(text(f"ALTER TABLE recordings ADD COLUMN {name} {ddl}"))
 
 
 @contextmanager

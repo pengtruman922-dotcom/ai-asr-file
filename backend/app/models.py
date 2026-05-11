@@ -146,7 +146,6 @@ class QAMessage(Base):
     project_id: Mapped[str] = mapped_column(String(64), index=True)
     role: Mapped[str] = mapped_column(String(32), default="user")
     content: Mapped[str] = mapped_column(Text, default="")
-    reasoning_content: Mapped[str] = mapped_column(Text, default="")
     selected_recording_ids: Mapped[list] = mapped_column(JSON, default=list)
     sources: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(64), default="ready")
