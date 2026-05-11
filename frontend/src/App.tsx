@@ -229,11 +229,51 @@ function Home({ onOpenProject, onSettings, onLogout }: { onOpenProject: (id: str
         )}
       </div>
 
-      <Modal title="新建项目" open={createOpen} onCancel={() => setCreateOpen(false)} onOk={createProject} okText="确认创建">
-        <Input placeholder="输入项目名称" value={projectName} onChange={(e) => setProjectName(e.target.value)} onPressEnter={createProject} />
+      <Modal
+        title="新建项目"
+        open={createOpen}
+        onCancel={() => setCreateOpen(false)}
+        onOk={createProject}
+        okText="确认创建 →"
+        cancelText="取消"
+        width={480}
+        okButtonProps={{ disabled: !projectName.trim() || projectName.length > 50 }}
+      >
+        <div className="project-modal-body">
+          <div className="project-modal-label">项目名称</div>
+          <Input
+            size="large"
+            placeholder="例：2025年Q2用户访谈"
+            value={projectName}
+            onChange={(e) => setProjectName(e.target.value)}
+            onPressEnter={createProject}
+            maxLength={50}
+            showCount
+          />
+        </div>
       </Modal>
-      <Modal title="修改项目名称" open={!!editProject} onCancel={() => setEditProject(null)} onOk={updateProject} okText="保存">
-        <Input placeholder="输入项目名称" value={projectName} onChange={(e) => setProjectName(e.target.value)} onPressEnter={updateProject} />
+      <Modal
+        title="修改项目名称"
+        open={!!editProject}
+        onCancel={() => setEditProject(null)}
+        onOk={updateProject}
+        okText="保存修改"
+        cancelText="取消"
+        width={480}
+        okButtonProps={{ disabled: !projectName.trim() || projectName.length > 50 }}
+      >
+        <div className="project-modal-body">
+          <div className="project-modal-label">项目名称</div>
+          <Input
+            size="large"
+            placeholder="输入项目名称"
+            value={projectName}
+            onChange={(e) => setProjectName(e.target.value)}
+            onPressEnter={updateProject}
+            maxLength={50}
+            showCount
+          />
+        </div>
       </Modal>
     </div>
   );

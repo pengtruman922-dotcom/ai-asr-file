@@ -72,6 +72,10 @@ body { background: #f5f6f8; color: #1d2433; font-family: -apple-system, BlinkMac
 .project-card:hover .project-card-open { opacity: 1; }
 
 @media (max-width: 640px) { .home-hero { padding: 32px 16px 28px; } .home-body { padding: 24px 16px; } .project-grid { grid-template-columns: 1fr; } .home-search-row { flex-direction: column; align-items: stretch; } .home-new-btn { justify-content: center; } }
+
+/* ── Project Modal ── */
+.project-modal-body { padding: 8px 0 4px; display: flex; flex-direction: column; gap: 8px; }
+.project-modal-label { font-size: 13px; font-weight: 500; color: #4a5568; }
 .project-shell { height: 100vh; display: flex; flex-direction: column; background: #f6f2ea; }
 .project-title { height: 58px; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; border-bottom: 1px solid #dfd5c6; background: #fffaf0; }
 .workspace-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--left-panel-width, 280px) 8px minmax(480px, 1fr) 8px var(--right-panel-width, 380px); gap: 0; background: #dfd5c6; }
