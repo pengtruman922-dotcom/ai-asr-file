@@ -838,6 +838,29 @@ async def create_file_upload_session(project_id: str, payload: dict, request: Re
     recording_id = new_id("rec") if file_type == "audio" else None
     storage_config = resolve_storage_config(db)
     object_key = f"projects/{project_id}/files/{file_id}/original.{extension}"
+    if file_type == "audio":
+        recording = Recording(
+            id=recording_id,
+            project_id=project.id,
+            file_name=payload.get("file_name") or f"{file_id}.{extension}",
+            object_key=object_key,
+            storage_config_id="default",
+            storage_provider=storage_config.get("provider", "railway_bucket"),
+            storage_bucket_name=storage_config.get("bucket_name", ""),
+            storage_endpoint=storage_config.get("endpoint", ""),
+            storage_region=storage_config.get("region", "auto"),
+            storage_path_prefix=storage_config.get("path_prefix", ""),
+            mime_type=payload.get("mime_type") or "application/octet-stream",
+            extension=extension,
+            file_size_bytes=size,
+            duration_seconds=duration_seconds,
+            status="uploading",
+            template_type=payload.get("template_type") or "customer_interview",
+        )
+        db.add(recording)
+        # PostgreSQL enforces the project_files.recording_id foreign key immediately.
+        # Flush the recording first so the unified file row can safely reference it.
+        db.flush()
     project_file = ProjectFile(
         id=file_id,
         project_id=project.id,
@@ -860,26 +883,6 @@ async def create_file_upload_session(project_id: str, payload: dict, request: Re
         extraction_status="" if file_type == "audio" else "pending",
     )
     db.add(project_file)
-    if file_type == "audio":
-        recording = Recording(
-            id=recording_id,
-            project_id=project.id,
-            file_name=project_file.file_name,
-            object_key=object_key,
-            storage_config_id="default",
-            storage_provider=project_file.storage_provider,
-            storage_bucket_name=project_file.storage_bucket_name,
-            storage_endpoint=project_file.storage_endpoint,
-            storage_region=project_file.storage_region,
-            storage_path_prefix=project_file.storage_path_prefix,
-            mime_type=project_file.mime_type,
-            extension=extension,
-            file_size_bytes=size,
-            duration_seconds=duration_seconds,
-            status="uploading",
-            template_type=payload.get("template_type") or "customer_interview",
-        )
-        db.add(recording)
     try:
         upload = storage.create_upload_url(object_key, project_file.mime_type, storage_config)
     except RuntimeError as exc:
