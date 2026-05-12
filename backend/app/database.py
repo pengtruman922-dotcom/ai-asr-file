@@ -44,7 +44,7 @@ def ensure_compatibility_schema() -> None:
         existing_projects = {column["name"] for column in inspector.get_columns("projects")}
         project_required = {
             "owner_id": "VARCHAR(64)",
-            "is_shared": "BOOLEAN DEFAULT 0",
+            "is_shared": "BOOLEAN DEFAULT false",
         }
         project_missing = [(name, ddl) for name, ddl in project_required.items() if name not in existing_projects]
         if project_missing:
