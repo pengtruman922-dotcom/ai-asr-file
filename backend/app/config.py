@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     max_qa_recordings: int = 10
     qa_overflow_strategy: str = "reject"
 
+    ocr_service_url: str = ""
+    ocr_service_token: str = ""
+    ocr_service_timeout_seconds: int = 900
+
     @property
     def max_upload_size_bytes(self) -> int:
         return self.max_upload_size_mb * 1024 * 1024

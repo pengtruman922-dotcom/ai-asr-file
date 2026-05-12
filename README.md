@@ -1,4 +1,4 @@
-# AI ASR File MVP
+﻿# AI ASR File MVP
 
 A Railway-ready MVP for consulting interview audio transcription and analysis.
 
@@ -50,12 +50,12 @@ Repository layout:
 
 ```text
 /
-├── requirements.txt
-├── Dockerfile
-├── backend/
-│   └── app/main.py
-├── frontend/
-└── railway.web.toml / railway.worker.toml
+鈹溾攢鈹€ requirements.txt
+鈹溾攢鈹€ Dockerfile
+鈹溾攢鈹€ backend/
+鈹?  鈹斺攢鈹€ app/main.py
+鈹溾攢鈹€ frontend/
+鈹斺攢鈹€ railway.web.toml / railway.worker.toml
 ```
 
 
@@ -110,3 +110,5 @@ Notes:
 - Web and Worker must share the same PostgreSQL and Redis variables.
 - The ASR model is configurable. If your Aliyun account does not accept `fun-asr`, set the ASR model in System Settings to the enabled model name such as `paraformer-v2`.
 - When System Settings are saved, AI and Bucket credentials are stored in PostgreSQL so both Railway services can read the same runtime configuration.
+
+OCR setup guide: see `OCR_SETUP.md`.

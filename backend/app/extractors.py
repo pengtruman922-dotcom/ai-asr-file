@@ -6,6 +6,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import requests
+
+from .config import get_settings
+
 
 def extract_content(file_name: str, extension: str, content: bytes) -> dict[str, Any]:
     extension = extension.lower().lstrip(".")
@@ -170,7 +174,12 @@ def extract_pdf(file_name: str, content: bytes) -> dict[str, Any]:
 
 
 def _extract_pdf_with_paddleocr(content: bytes) -> dict[str, Any]:
+    service_result = _extract_pdf_with_ocr_service(content)
+    if service_result and service_result.get("text"):
+        return service_result
     warnings: list[str] = []
+    if service_result and service_result.get("warnings"):
+        warnings.extend(service_result["warnings"])
     try:
         import fitz
         from paddleocr import PaddleOCR
@@ -194,6 +203,30 @@ def _extract_pdf_with_paddleocr(content: bytes) -> dict[str, Any]:
                 if lines:
                     texts.append(f"## 第 {page_index} 页 OCR文本\n" + "\n".join(lines))
     return {"text": "\n\n".join(texts), "warnings": warnings}
+
+
+def _extract_pdf_with_ocr_service(content: bytes) -> dict[str, Any] | None:
+    settings = get_settings()
+    if not settings.ocr_service_url:
+        return None
+    endpoint = settings.ocr_service_url.rstrip("/") + "/api/ocr/pdf"
+    headers = {}
+    if settings.ocr_service_token:
+        headers["Authorization"] = f"Bearer {settings.ocr_service_token}"
+    try:
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            files={"file": ("document.pdf", content, "application/pdf")},
+            timeout=settings.ocr_service_timeout_seconds,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:
+        return {"text": "", "warnings": [f"OCR 服务调用失败：{exc}"]}
+    warnings = list(data.get("warnings") or [])
+    warnings.insert(0, "扫描件 OCR 由独立 OCR 服务完成。")
+    return {"text": str(data.get("text") or ""), "warnings": warnings, "engine": "OCR Service"}
 
 
 def _rows_to_markdown_or_tsv(rows: list[list[Any]]) -> str:

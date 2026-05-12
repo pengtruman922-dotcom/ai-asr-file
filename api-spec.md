@@ -2185,3 +2185,55 @@ ASR 诊断事件包括：`download_url_created`、`submit_start`、`submit_compl
   - 返回项目文件数、录音总时长、问答次数、输入/输出 Token。
 - `GET /api/admin/usage/users`
   - 返回用户录音处理量、ASR 次数、问答次数、输入/输出 Token。
+
+---
+
+## 2026-05-12 OCR 独立服务补充
+
+扫描 PDF OCR 拆分为独立 Railway 服务，避免 Web/Worker 镜像直接安装 PaddleOCR 导致构建体积过大。
+
+- 服务目录：`ocr/`
+- 服务类型：FastAPI + Dockerfile
+- OCR 引擎：PaddleOCR
+- 调用方：Worker 在 PDF 文本提取结果过少时，通过 `OCR_SERVICE_URL` 调用 OCR 服务。
+- 鉴权：如果配置 `OCR_SERVICE_TOKEN`，Worker 会以 `Authorization: Bearer <token>` 调用。
+
+### OCR Service API
+
+`GET /health`
+
+返回 OCR 服务状态。
+
+`POST /api/ocr/pdf`
+
+请求：`multipart/form-data`
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| file | file | PDF 文件 |
+| max_pages | number | 可选，本次最多 OCR 页数，不能超过服务端 `OCR_MAX_PAGES` |
+
+返回：
+
+```json
+{
+  "engine": "PaddleOCR",
+  "lang": "ch",
+  "page_count": 3,
+  "text": "## 第 1 页 OCR文本\n...",
+  "pages": [
+    { "page_number": 1, "text": "...", "line_count": 20 }
+  ],
+  "warnings": []
+}
+```
+
+### Worker 环境变量
+
+```bash
+OCR_SERVICE_URL=http://${{OCR.RAILWAY_PRIVATE_DOMAIN}}:${{OCR.PORT}}
+OCR_SERVICE_TOKEN=${{OCR.OCR_SERVICE_TOKEN}}
+OCR_SERVICE_TIMEOUT_SECONDS=900
+```
+
+> 注意：Railway 私有网络引用 ${{OCR.PORT}} 时，OCR 服务自身需显式设置 PORT=8000，因为服务引用变量不会自动读取运行时注入的 PORT。

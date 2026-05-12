@@ -1393,3 +1393,17 @@ V1.0 推荐：
 ### 15.1 OCR 说明
 
 代码层已为扫描 PDF 预留 PaddleOCR 调用路径：当 PDF 文本提取结果过少时，会尝试导入 `paddleocr` 并逐页 OCR。当前部署依赖默认不强制安装 PaddleOCR，以避免 Railway 构建体积和系统依赖风险；如需在 V1.0 正式环境启用扫描 PDF OCR，需要单独为 Worker 镜像安装 PaddleOCR/PaddlePaddle，或拆分 OCR Worker 服务。
+
+---
+
+### 15.2 OCR 独立服务落地
+
+为降低 Web/Worker 镜像体积和 Railway 构建失败风险，扫描 PDF OCR 不直接安装在主应用镜像中，而是拆为独立 Railway 服务：
+
+- 目录：`ocr/`
+- 技术：FastAPI + PyMuPDF + PaddleOCR
+- 触发：PDF 文本层提取结果过少时，Worker 调用 OCR 服务。
+- 配置：Worker 使用 `OCR_SERVICE_URL` 和 `OCR_SERVICE_TOKEN` 调用。
+- 网络：推荐使用 Railway Private Networking，不暴露 OCR 公网域名。
+
+这仍符合 V1.0“扫描 PDF 必做 OCR”的产品要求，同时将 PaddleOCR 的重依赖风险隔离在 OCR Worker 服务中。
