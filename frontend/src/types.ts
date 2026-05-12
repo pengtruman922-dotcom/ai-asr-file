@@ -108,7 +108,7 @@ export type User = {
   username: string;
   display_name: string;
   role: 'admin' | 'user';
-  status: 'active' | 'disabled';
+  status: 'active' | 'disabled' | 'deleted';
   quota?: UserQuota;
 };
 

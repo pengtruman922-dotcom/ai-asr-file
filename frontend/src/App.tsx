@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
+import type { CSSProperties, Key, PointerEvent as ReactPointerEvent } from 'react';
 import { Button, Card, Checkbox, Dropdown, Form, Input, InputNumber, Layout, List, Modal, Progress, Radio, Select, Space, Table, Tabs, Tag, Typography, Upload, message } from 'antd';
 import { DeleteOutlined, DownloadOutlined, DownOutlined, EditOutlined, InboxOutlined, MoreOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
 import type { MenuProps, UploadFile } from 'antd';
@@ -17,11 +17,19 @@ const RIGHT_PANEL_MIN = 300;
 const RIGHT_PANEL_MAX = 930;
 const MIDDLE_PANEL_MIN = 480;
 const RESIZE_HANDLE_TOTAL_WIDTH = 16;
+const SECONDS_PER_HOUR = 3600;
+const TOKENS_PER_KTOKEN = 1000;
 
 type ProjectColumnWidths = typeof PROJECT_LAYOUT_DEFAULT;
 type ResizeDivider = 'left' | 'right';
 type SegmentSaveOptions = { replaceSameSpeaker?: boolean };
 type SegmentUpdateResult = { summary_stale?: boolean; updated_count?: number };
+type QuotaFormValues = {
+  daily_asr_hours: number;
+  monthly_asr_hours: number;
+  daily_qa_ktokens: number;
+  monthly_qa_ktokens: number;
+};
 type RecordingStatus =
   | 'created'
   | 'uploading'
@@ -76,6 +84,48 @@ const PROCESSING_RECORDING_STATUSES = new Set<RecordingStatus>([
   'summary_generating',
   'extracting',
 ]);
+
+function secondsToHours(seconds?: number) {
+  return Number(((seconds || 0) / SECONDS_PER_HOUR).toFixed(2));
+}
+
+function hoursToSeconds(hours?: number) {
+  return Math.round((hours || 0) * SECONDS_PER_HOUR);
+}
+
+function tokensToK(tokens?: number) {
+  return Number(((tokens || 0) / TOKENS_PER_KTOKEN).toFixed(2));
+}
+
+function kToTokens(ktokens?: number) {
+  return Math.round((ktokens || 0) * TOKENS_PER_KTOKEN);
+}
+
+function formatHoursFromSeconds(seconds?: number) {
+  return `${secondsToHours(seconds).toFixed(2)} 小时`;
+}
+
+function formatKTokens(tokens?: number) {
+  return `${tokensToK(tokens).toFixed(2)} KToken`;
+}
+
+function quotaToFormValues(quota?: UserQuota | null): QuotaFormValues {
+  return {
+    daily_asr_hours: secondsToHours(quota?.daily_asr_seconds),
+    monthly_asr_hours: secondsToHours(quota?.monthly_asr_seconds),
+    daily_qa_ktokens: tokensToK(quota?.daily_qa_tokens),
+    monthly_qa_ktokens: tokensToK(quota?.monthly_qa_tokens),
+  };
+}
+
+function formValuesToQuota(values: QuotaFormValues): UserQuota {
+  return {
+    daily_asr_seconds: hoursToSeconds(values.daily_asr_hours),
+    monthly_asr_seconds: hoursToSeconds(values.monthly_asr_hours),
+    daily_qa_tokens: kToTokens(values.daily_qa_ktokens),
+    monthly_qa_tokens: kToTokens(values.monthly_qa_ktokens),
+  };
+}
 
 const JOB_TYPE_LABELS: Record<string, string> = {
   asr_transcription: 'ASR 转写',
@@ -358,11 +408,11 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
             <h2 className="login-form-title">洞见</h2>
             <p className="login-form-subtitle">MP&nbsp;Insight</p>
             <span className="login-form-rule" />
-            <p className="login-form-hint">欢迎回来，请使用管理员分配的账号登录。<br />内测期间默认账号：<em>admin</em> / <em>mp2026</em></p>
+            <p className="login-form-hint">欢迎回来，请使用管理员分配的用户ID登录。<br />内测期间默认用户ID：<em>admin</em> / <em>mp2026</em></p>
           </div>
           <Form className="login-form" layout="vertical" initialValues={{ username: 'admin', password: 'mp2026' }} onFinish={onFinish}>
-            <Form.Item name="username" label="账号" rules={[{ required: true, message: '请输入账号' }]}>
-              <Input size="large" variant="borderless" className="login-input" placeholder="请输入账号" />
+            <Form.Item name="username" label="用户ID" rules={[{ required: true, message: '请输入用户ID' }]}>
+              <Input size="large" variant="borderless" className="login-input" placeholder="请输入用户ID" />
             </Form.Item>
             <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>
               <Input.Password size="large" variant="borderless" className="login-input" placeholder="请输入密码" />
@@ -560,10 +610,10 @@ function UserUsageDropdown({ me, usage, onAdmin, onLogout }: { me: User | null; 
   const card = <div className="usage-dropdown-card">
     <Text strong>{me?.display_name || me?.username || '当前用户'}</Text>
     <Text type="secondary">{me?.role === 'admin' ? '管理员' : '普通用户'}</Text>
-    <UsageProgress label="今日 ASR" value={usage?.today.asr_seconds || 0} limit={dailyAsrLimit} formatter={formatDuration} />
-    <UsageProgress label="本月 ASR" value={usage?.month.asr_seconds || 0} limit={monthlyAsrLimit} formatter={formatDuration} />
-    <UsageProgress label="今日问答 Token" value={usage?.today.qa_tokens || 0} limit={dailyQaLimit} />
-    <UsageProgress label="本月问答 Token" value={usage?.month.qa_tokens || 0} limit={monthlyQaLimit} />
+    <UsageProgress label="今日 ASR" value={usage?.today.asr_seconds || 0} limit={dailyAsrLimit} formatter={formatHoursFromSeconds} />
+    <UsageProgress label="本月 ASR" value={usage?.month.asr_seconds || 0} limit={monthlyAsrLimit} formatter={formatHoursFromSeconds} />
+    <UsageProgress label="今日问答" value={usage?.today.qa_tokens || 0} limit={dailyQaLimit} formatter={formatKTokens} />
+    <UsageProgress label="本月问答" value={usage?.month.qa_tokens || 0} limit={monthlyQaLimit} formatter={formatKTokens} />
     <Space direction="vertical" style={{ width: '100%' }}>
       {me?.role === 'admin' && <Button block onClick={onAdmin}>管理后台</Button>}
       <Button block onClick={onLogout}>退出</Button>
@@ -1441,18 +1491,53 @@ function QueueModal({ open, projectId, clockNow, onClose, onRefresh }: { open: b
 
 function MembersModal({ open, projectId, project, onClose, onRefresh }: { open: boolean; projectId: string; project: Project | null; onClose: () => void; onRefresh: () => void }) {
   const [members, setMembers] = useState<User[]>([]);
-  const [username, setUsername] = useState('');
+  const [memberOptions, setMemberOptions] = useState<User[]>([]);
+  const [memberSearch, setMemberSearch] = useState('');
+  const [selectedUserId, setSelectedUserId] = useState('');
+  const [memberSearching, setMemberSearching] = useState(false);
   const [loading, setLoading] = useState(false);
+  const memberSearchSeq = useRef(0);
   const load = useCallback(async () => {
     if (!open) return;
     const data = await api<{ items: User[] }>(`/api/projects/${projectId}/members`);
     setMembers(data.items);
   }, [open, projectId]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (open) return;
+    setMemberSearch('');
+    setSelectedUserId('');
+    setMemberOptions([]);
+  }, [open]);
+  const searchMembers = useCallback(async (value: string) => {
+    setMemberSearch(value);
+    setSelectedUserId('');
+    const keyword = value.trim();
+    if (!keyword) {
+      setMemberOptions([]);
+      return;
+    }
+    const seq = memberSearchSeq.current + 1;
+    memberSearchSeq.current = seq;
+    setMemberSearching(true);
+    try {
+      const data = await api<{ items: User[] }>(`/api/users/search?project_id=${projectId}&keyword=${encodeURIComponent(keyword)}`);
+      if (memberSearchSeq.current === seq) setMemberOptions(data.items);
+    } catch {
+      if (memberSearchSeq.current === seq) setMemberOptions([]);
+    } finally {
+      if (memberSearchSeq.current === seq) setMemberSearching(false);
+    }
+  }, [projectId]);
   const add = async () => {
-    if (!username.trim()) return;
-    await api(`/api/projects/${projectId}/members`, { method: 'POST', body: JSON.stringify({ username: username.trim() }) });
-    setUsername('');
+    if (!selectedUserId) {
+      message.warning('请先搜索并选择用户');
+      return;
+    }
+    await api(`/api/projects/${projectId}/members`, { method: 'POST', body: JSON.stringify({ user_id: selectedUserId }) });
+    setMemberSearch('');
+    setSelectedUserId('');
+    setMemberOptions([]);
     message.success('成员已添加');
     void load();
   };
@@ -1495,11 +1580,23 @@ function MembersModal({ open, projectId, project, onClose, onRefresh }: { open: 
       </Card>
       <Card size="small" title="项目成员">
         <Space.Compact style={{ width: '100%', marginBottom: 12 }}>
-          <Input placeholder="输入用户名添加成员" value={username} onChange={(e) => setUsername(e.target.value)} onPressEnter={add} />
+          <Select
+            showSearch
+            allowClear
+            value={selectedUserId || undefined}
+            placeholder="搜索用户ID或姓名"
+            filterOption={false}
+            onSearch={searchMembers}
+            onClear={() => { setMemberSearch(''); setSelectedUserId(''); setMemberOptions([]); }}
+            onChange={(value) => setSelectedUserId(value || '')}
+            notFoundContent={memberSearching ? '搜索中...' : '无匹配用户'}
+            style={{ width: '100%' }}
+            options={memberOptions.map((item) => ({ value: item.user_id, label: `${item.display_name || item.username}（${item.username}）` }))}
+          />
           <Button type="primary" onClick={add}>添加</Button>
         </Space.Compact>
         <Table rowKey="user_id" size="small" pagination={false} dataSource={members} columns={[
-          { title: '用户名', dataIndex: 'username' },
+          { title: '用户ID', dataIndex: 'username' },
           { title: '姓名', dataIndex: 'display_name' },
           { title: '角色', dataIndex: 'role', render: (value: string) => value === 'admin' ? '管理员' : '用户' },
           { title: '操作', width: 100, render: (_, row) => row.user_id === project?.owner_id ? <Tag>创建人</Tag> : <Button size="small" danger onClick={() => remove(row.user_id)}>移除</Button> }
@@ -1555,6 +1652,31 @@ type SettingsFormValues = {
   storage: AppSettings['storage'];
 };
 
+function EditableDisplayName({ user, onSave, disabled }: { user: User; onSave: (user: User, displayName: string) => Promise<void>; disabled?: boolean }) {
+  const [value, setValue] = useState(user.display_name || user.username);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setValue(user.display_name || user.username), [user.display_name, user.username]);
+  const save = async () => {
+    const nextValue = value.trim() || user.username;
+    if (nextValue === (user.display_name || user.username)) return;
+    setSaving(true);
+    try {
+      await onSave(user, nextValue);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <Input
+    size="small"
+    value={value}
+    disabled={disabled || saving}
+    suffix={<EditOutlined />}
+    onChange={(event) => setValue(event.target.value)}
+    onBlur={() => { void save(); }}
+    onPressEnter={() => { void save(); }}
+  />;
+}
+
 function AdminPage({ onBack }: { onBack: () => void }) {
   const [users, setUsers] = useState<User[]>([]);
   const [projectUsage, setProjectUsage] = useState<any[]>([]);
@@ -1562,21 +1684,31 @@ function AdminPage({ onBack }: { onBack: () => void }) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [quotaUser, setQuotaUser] = useState<User | null>(null);
+  const [me, setMe] = useState<User | null>(null);
+  const [includeDeleted, setIncludeDeleted] = useState(false);
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [savingDefaultQuota, setSavingDefaultQuota] = useState(false);
   const [form] = Form.useForm();
-  const [quotaForm] = Form.useForm<UserQuota>();
+  const [quotaForm] = Form.useForm<QuotaFormValues>();
+  const [defaultQuotaForm] = Form.useForm<QuotaFormValues>();
   const load = useCallback(async () => {
-    const [userData, projectData, userUsageData, jobData] = await Promise.all([
-      api<{ items: User[] }>('/api/admin/users'),
+    const [meData, userData, defaultQuotaData, projectData, userUsageData, jobData] = await Promise.all([
+      api<User>('/api/auth/me'),
+      api<{ items: User[] }>(`/api/admin/users?include_deleted=${includeDeleted ? 'true' : 'false'}`),
+      api<UserQuota>('/api/admin/default-quota'),
       api<{ items: any[] }>('/api/admin/usage/projects'),
       api<{ items: any[] }>('/api/admin/usage/users'),
       api<{ items: Job[] }>('/api/jobs/recent?page_size=50'),
     ]);
+    setMe(meData);
     setUsers(userData.items);
+    defaultQuotaForm.setFieldsValue(quotaToFormValues(defaultQuotaData));
     setProjectUsage(projectData.items);
     setUserUsage(userUsageData.items);
     setJobs(jobData.items);
-  }, []);
+  }, [defaultQuotaForm, includeDeleted]);
   useEffect(() => { void load().catch((err) => message.error((err as Error).message)); }, [load]);
+  useEffect(() => setSelectedUserIds([]), [includeDeleted]);
   const createUser = async () => {
     const values = await form.validateFields();
     await api('/api/admin/users', { method: 'POST', body: JSON.stringify(values) });
@@ -1593,44 +1725,112 @@ function AdminPage({ onBack }: { onBack: () => void }) {
   const openQuota = async (user: User) => {
     const quota = await api<UserQuota>(`/api/admin/users/${user.user_id}/quota`);
     setQuotaUser(user);
-    quotaForm.setFieldsValue(quota);
+    quotaForm.setFieldsValue(quotaToFormValues(quota));
   };
   const saveQuota = async () => {
     if (!quotaUser) return;
     const values = await quotaForm.validateFields();
-    await api(`/api/admin/users/${quotaUser.user_id}/quota`, { method: 'PATCH', body: JSON.stringify(values) });
+    await api(`/api/admin/users/${quotaUser.user_id}/quota`, { method: 'PATCH', body: JSON.stringify(formValuesToQuota(values)) });
     message.success('限额已保存');
     setQuotaUser(null);
     void load();
   };
+  const saveDefaultQuota = async () => {
+    const values = await defaultQuotaForm.validateFields();
+    setSavingDefaultQuota(true);
+    try {
+      const data = await api<UserQuota & { updated_user_count?: number }>('/api/admin/default-quota', { method: 'PATCH', body: JSON.stringify(formValuesToQuota(values)) });
+      defaultQuotaForm.setFieldsValue(quotaToFormValues(data));
+      message.success(`默认限额已保存并同步到 ${data.updated_user_count ?? 0} 个用户`);
+      void load();
+    } finally {
+      setSavingDefaultQuota(false);
+    }
+  };
+  const deleteUser = (user: User) => {
+    Modal.confirm({
+      title: `删除用户：${user.display_name || user.username}`,
+      content: '本操作为软删除：用户将不能登录，也不会出现在默认列表中；历史项目、文件和用量记录会保留。',
+      okText: '删除',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        await api(`/api/admin/users/${user.user_id}`, { method: 'DELETE' });
+        message.success('用户已删除');
+        setSelectedUserIds((ids) => ids.filter((id) => id !== user.user_id));
+        void load();
+      },
+    });
+  };
+  const batchDeleteUsers = () => {
+    if (!selectedUserIds.length) return;
+    Modal.confirm({
+      title: `批量删除 ${selectedUserIds.length} 个用户`,
+      content: '本操作为软删除，历史数据会保留。当前登录管理员和已删除用户会自动跳过。',
+      okText: '批量删除',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        const result = await api<{ deleted_count: number; skipped_user_ids: string[] }>('/api/admin/users/batch-delete', { method: 'POST', body: JSON.stringify({ user_ids: selectedUserIds }) });
+        message.success(`已删除 ${result.deleted_count} 个用户`);
+        setSelectedUserIds([]);
+        void load();
+      },
+    });
+  };
+  const userTableExtra = <Space>
+    <Checkbox checked={includeDeleted} onChange={(event) => setIncludeDeleted(event.target.checked)}>显示已删除用户</Checkbox>
+    <Button danger disabled={!selectedUserIds.length} onClick={batchDeleteUsers}>批量删除</Button>
+    <Button type="primary" onClick={() => setCreateOpen(true)}>新建用户</Button>
+  </Space>;
   return <>
     <Header className="topbar"><Space><Button onClick={onBack}>返回</Button><Title level={3}>管理后台</Title></Space></Header>
     <Content className="home-content settings-content">
       <Tabs items={[
-        { key: 'users', label: '用户管理', children: <Card extra={<Button type="primary" onClick={() => setCreateOpen(true)}>新建用户</Button>}>
-          <Table rowKey="user_id" dataSource={users} pagination={false} columns={[
-            { title: '用户名', dataIndex: 'username' },
-            { title: '姓名', dataIndex: 'display_name' },
-            { title: '角色', dataIndex: 'role', render: (value: string, row: User) => <Select size="small" value={value} style={{ width: 100 }} onChange={(role) => updateUser(row, { role: role as User['role'] })} options={[{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }]} /> },
-            { title: '状态', dataIndex: 'status', render: (value: string, row: User) => <Select size="small" value={value} style={{ width: 100 }} onChange={(status) => updateUser(row, { status: status as User['status'] })} options={[{ value: 'active', label: '启用' }, { value: 'disabled', label: '停用' }]} /> },
-            { title: '操作', render: (_, row) => <Space><Button size="small" onClick={() => openQuota(row)}>限额</Button><Button size="small" onClick={() => Modal.confirm({ title: '重置密码', content: <Input.Password id="reset-password-input" placeholder="输入新密码" />, onOk: async () => { const input = document.getElementById('reset-password-input') as HTMLInputElement | null; await api(`/api/admin/users/${row.user_id}/reset-password`, { method: 'POST', body: JSON.stringify({ password: input?.value || '' }) }); message.success('密码已重置'); } })}>重置密码</Button></Space> }
-          ]} />
-        </Card> },
+        { key: 'users', label: '用户管理', children: <Space direction="vertical" style={{ width: '100%' }}>
+          <Card size="small" title="统一默认限额" extra={<Button type="primary" loading={savingDefaultQuota} onClick={saveDefaultQuota}>保存并同步全部用户</Button>}>
+            <Form form={defaultQuotaForm} layout="inline">
+              <Form.Item name="daily_asr_hours" label="每日 ASR" tooltip="单位：小时；0 表示不限"><InputNumber min={0} precision={2} addonAfter="小时" style={{ width: 150 }} /></Form.Item>
+              <Form.Item name="monthly_asr_hours" label="每月 ASR" tooltip="单位：小时；0 表示不限"><InputNumber min={0} precision={2} addonAfter="小时" style={{ width: 150 }} /></Form.Item>
+              <Form.Item name="daily_qa_ktokens" label="每日问答" tooltip="单位：KToken；0 表示不限"><InputNumber min={0} precision={2} addonAfter="KToken" style={{ width: 170 }} /></Form.Item>
+              <Form.Item name="monthly_qa_ktokens" label="每月问答" tooltip="单位：KToken；0 表示不限"><InputNumber min={0} precision={2} addonAfter="KToken" style={{ width: 170 }} /></Form.Item>
+            </Form>
+          </Card>
+          <Card extra={userTableExtra}>
+            <Table
+              rowKey="user_id"
+              dataSource={users}
+              pagination={false}
+              rowSelection={{
+                selectedRowKeys: selectedUserIds,
+                onChange: (keys: Key[]) => setSelectedUserIds(keys.map(String)),
+                getCheckboxProps: (record: User) => ({ disabled: record.user_id === me?.user_id || record.status === 'deleted' }),
+              }}
+              columns={[
+                { title: '用户ID', dataIndex: 'username' },
+                { title: '姓名', dataIndex: 'display_name', render: (_: string, row: User) => <EditableDisplayName user={row} disabled={row.status === 'deleted'} onSave={(target, displayName) => updateUser(target, { display_name: displayName })} /> },
+                { title: '角色', dataIndex: 'role', render: (value: string, row: User) => <Select size="small" value={value} disabled={row.status === 'deleted'} style={{ width: 100 }} onChange={(role) => updateUser(row, { role: role as User['role'] })} options={[{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }]} /> },
+                { title: '状态', dataIndex: 'status', render: (value: string, row: User) => value === 'deleted' ? <Tag color="red">已删除</Tag> : <Select size="small" value={value} disabled={row.user_id === me?.user_id} style={{ width: 100 }} onChange={(status) => updateUser(row, { status: status as User['status'] })} options={[{ value: 'active', label: '启用' }, { value: 'disabled', label: '停用' }]} /> },
+                { title: '每日ASR', render: (_: unknown, row: User) => formatHoursFromSeconds(row.quota?.daily_asr_seconds) },
+                { title: '每日问答', render: (_: unknown, row: User) => formatKTokens(row.quota?.daily_qa_tokens) },
+                { title: '操作', render: (_: unknown, row: User) => <Space><Button size="small" disabled={row.status === 'deleted'} onClick={() => openQuota(row)}>限额</Button><Button size="small" disabled={row.status === 'deleted'} onClick={() => Modal.confirm({ title: '重置密码', content: <Input.Password id="reset-password-input" placeholder="输入新密码" />, onOk: async () => { const input = document.getElementById('reset-password-input') as HTMLInputElement | null; await api(`/api/admin/users/${row.user_id}/reset-password`, { method: 'POST', body: JSON.stringify({ password: input?.value || '' }) }); message.success('密码已重置'); } })}>重置密码</Button><Button size="small" danger disabled={row.user_id === me?.user_id || row.status === 'deleted'} onClick={() => deleteUser(row)}>删除</Button></Space> }
+              ]}
+            />
+          </Card>
+        </Space> },
         { key: 'projectUsage', label: '项目用量报表', children: <Card><Table rowKey="project_id" dataSource={projectUsage} pagination={{ pageSize: 10 }} columns={[
           { title: '项目', dataIndex: 'project_name' },
           { title: '文件数', dataIndex: 'file_count' },
-          { title: '录音总时长', dataIndex: 'audio_duration_seconds', render: formatDuration },
+          { title: '录音总时长', dataIndex: 'audio_duration_seconds', render: formatHoursFromSeconds },
           { title: '问答次数', dataIndex: 'qa_count' },
-          { title: '输入 Token', dataIndex: 'qa_input_tokens' },
-          { title: '输出 Token', dataIndex: 'qa_output_tokens' },
+          { title: '输入', dataIndex: 'qa_input_tokens', render: formatKTokens },
+          { title: '输出', dataIndex: 'qa_output_tokens', render: formatKTokens },
         ]} /></Card> },
         { key: 'userUsage', label: '用户用量报表', children: <Card><Table rowKey="user_id" dataSource={userUsage} pagination={{ pageSize: 10 }} columns={[
           { title: '用户', dataIndex: 'display_name' },
-          { title: '录音处理量', dataIndex: 'audio_duration_seconds', render: formatDuration },
+          { title: '录音处理量', dataIndex: 'audio_duration_seconds', render: formatHoursFromSeconds },
           { title: 'ASR次数', dataIndex: 'asr_count' },
           { title: '问答次数', dataIndex: 'qa_count' },
-          { title: '输入 Token', dataIndex: 'qa_input_tokens' },
-          { title: '输出 Token', dataIndex: 'qa_output_tokens' },
+          { title: '输入', dataIndex: 'qa_input_tokens', render: formatKTokens },
+          { title: '输出', dataIndex: 'qa_output_tokens', render: formatKTokens },
         ]} /></Card> },
         { key: 'jobs', label: '任务监控', children: <Card><Table rowKey="job_id" dataSource={jobs} pagination={{ pageSize: 10 }} columns={[
           { title: '任务', dataIndex: 'job_type', render: jobTypeLabel },
@@ -1642,7 +1842,7 @@ function AdminPage({ onBack }: { onBack: () => void }) {
       ]} />
       <Modal title="新建用户" open={createOpen} onOk={createUser} onCancel={() => setCreateOpen(false)} okText="创建" cancelText="取消">
         <Form form={form} layout="vertical" initialValues={{ role: 'user', status: 'active' }}>
-          <Form.Item name="username" label="用户名" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="username" label="用户ID" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="display_name" label="姓名"><Input /></Form.Item>
           <Form.Item name="password" label="初始密码" rules={[{ required: true }]}><Input.Password /></Form.Item>
           <Form.Item name="role" label="角色"><Select options={[{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }]} /></Form.Item>
@@ -1651,10 +1851,10 @@ function AdminPage({ onBack }: { onBack: () => void }) {
       </Modal>
       <Modal title={`设置限额：${quotaUser?.display_name || ''}`} open={!!quotaUser} onOk={saveQuota} onCancel={() => setQuotaUser(null)} okText="保存" cancelText="取消">
         <Form form={quotaForm} layout="vertical">
-          <Form.Item name="daily_asr_seconds" label="每日 ASR 时长上限（秒，0 表示不限）"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
-          <Form.Item name="monthly_asr_seconds" label="每月 ASR 时长上限（秒，0 表示不限）"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
-          <Form.Item name="daily_qa_tokens" label="每日问答 Token 上限（0 表示不限）"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
-          <Form.Item name="monthly_qa_tokens" label="每月问答 Token 上限（0 表示不限）"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="daily_asr_hours" label="每日 ASR 时长上限（小时，0 表示不限）"><InputNumber min={0} precision={2} addonAfter="小时" style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="monthly_asr_hours" label="每月 ASR 时长上限（小时，0 表示不限）"><InputNumber min={0} precision={2} addonAfter="小时" style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="daily_qa_ktokens" label="每日问答 Token 上限（KToken，0 表示不限）"><InputNumber min={0} precision={2} addonAfter="KToken" style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="monthly_qa_ktokens" label="每月问答 Token 上限（KToken，0 表示不限）"><InputNumber min={0} precision={2} addonAfter="KToken" style={{ width: '100%' }} /></Form.Item>
         </Form>
       </Modal>
     </Content>
