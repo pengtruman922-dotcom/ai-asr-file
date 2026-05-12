@@ -10,12 +10,345 @@ body { background: #f5f6f8; color: #1d2433; font-family: -apple-system, BlinkMac
 .project-table .ant-table-row:hover td { background: #f0f5ff !important; }
 .hero-card { background: linear-gradient(135deg, #fff, #f0f5ff); border: 1px solid #dce4f5; }
 
-/* ── Login ── */
-.login-page { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 28px; background: linear-gradient(135deg, #e8eef8 0%, #f5f6f8 100%); }
-.login-brand { display: flex; align-items: center; gap: 12px; color: #1d2433; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
-.login-logo { width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #3b6fd4, #5b8ef0); display: flex; align-items: center; justify-content: center; color: #fff; flex-shrink: 0; }
-.login-card { width: 420px; box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 16px 48px rgba(0,0,0,0.1); border-radius: 14px; background: #fff; border: 1px solid #e4e8f0; }
-.login-card .ant-card-body { padding: 36px; }
+/* ── Login (MP Insight redesign) ── */
+.login-page {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 55fr 45fr;
+  background: #f7f4ee;
+  font-family: "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.login-stage {
+  position: relative;
+  background:
+    radial-gradient(circle at 80% 10%, rgba(184,146,74,0.18), transparent 55%),
+    linear-gradient(135deg, #5a1219 0%, #7a1a23 50%, #8b1f2a 100%);
+  color: #f3e9d8;
+  padding: 56px 64px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  overflow: hidden;
+}
+
+.login-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(184,146,74,0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(184,146,74,0.05) 1px, transparent 1px);
+  background-size: 100% 48px, 48px 100%;
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.login-stage::after {
+  content: "";
+  position: absolute;
+  right: -120px;
+  bottom: -120px;
+  width: 360px;
+  height: 360px;
+  border-radius: 50%;
+  border: 1px solid rgba(184,146,74,0.18);
+  pointer-events: none;
+}
+
+.login-stage > * { position: relative; z-index: 1; }
+
+.login-stage-top {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  animation: loginFadeUp 600ms ease-out both;
+}
+
+.login-mark {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #f3e9d8;
+  color: #8b1f2a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: "Source Han Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 26px;
+  font-weight: 700;
+  box-shadow: 0 0 0 4px rgba(243,233,216,0.12);
+}
+
+.login-mark-cn { line-height: 1; }
+
+.login-stage-brand-cn {
+  font-family: "Source Han Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 18px;
+  letter-spacing: 0.12em;
+  color: #f3e9d8;
+}
+
+.login-stage-brand-en {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: rgba(243,233,216,0.55);
+  margin-top: 4px;
+  text-transform: uppercase;
+}
+
+.login-stage-center {
+  max-width: 460px;
+  animation: loginFadeUp 800ms 120ms ease-out both;
+}
+
+.login-quote-en {
+  font-family: "Cormorant Garamond", "Georgia", serif;
+  font-size: 18px;
+  font-style: italic;
+  color: rgba(243,233,216,0.6);
+  margin: 0 0 14px;
+  letter-spacing: 0.03em;
+}
+
+.login-quote-cn {
+  font-family: "Source Han Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 44px;
+  font-weight: 600;
+  color: #f3e9d8;
+  margin: 0;
+  line-height: 1.35;
+  letter-spacing: 0.02em;
+}
+
+.login-quote-divider {
+  width: 56px;
+  height: 1px;
+  background: #b8924a;
+  margin: 24px 0 16px;
+}
+
+.login-quote-sub {
+  font-size: 13px;
+  color: rgba(243,233,216,0.7);
+  margin: 0;
+  letter-spacing: 0.1em;
+}
+
+.login-stage-bottom {
+  display: flex;
+  gap: 56px;
+  animation: loginFadeUp 800ms 240ms ease-out both;
+}
+
+.login-stage-stat { display: flex; flex-direction: column; gap: 4px; }
+
+.login-stage-stat-num {
+  font-family: "Cormorant Garamond", "Georgia", serif;
+  font-size: 28px;
+  font-weight: 600;
+  color: #b8924a;
+  line-height: 1;
+}
+
+.login-stage-stat-label {
+  font-size: 12px;
+  color: rgba(243,233,216,0.6);
+  letter-spacing: 0.08em;
+}
+
+.login-form-side {
+  display: flex;
+  flex-direction: column;
+  background: #f7f4ee;
+  position: relative;
+  animation: loginFadeIn 600ms 200ms ease-out both;
+}
+
+.login-form-side::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 96px;
+  bottom: 96px;
+  width: 1px;
+  background: linear-gradient(180deg, transparent, rgba(184,146,74,0.4), transparent);
+}
+
+.login-form-topbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 24px 40px;
+}
+
+.login-form-topbar-text {
+  font-size: 12px;
+  color: #8a8378;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  transition: color 160ms;
+}
+
+.login-form-topbar-text:hover { color: #8b1f2a; }
+
+.login-form-wrap {
+  flex: 1;
+  max-width: 420px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 24px 40px 40px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.login-form-heading { margin-bottom: 36px; }
+
+.login-form-title {
+  font-family: "Source Han Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 40px;
+  font-weight: 600;
+  color: #1a1d24;
+  margin: 0 0 4px;
+  letter-spacing: 0.12em;
+}
+
+.login-form-subtitle {
+  font-family: "Cormorant Garamond", "Georgia", serif;
+  font-size: 18px;
+  font-style: italic;
+  color: #8b1f2a;
+  margin: 0;
+  letter-spacing: 0.08em;
+}
+
+.login-form-rule {
+  display: block;
+  width: 36px;
+  height: 2px;
+  background: #8b1f2a;
+  margin: 18px 0 16px;
+}
+
+.login-form-hint {
+  font-size: 13px;
+  color: #6b7280;
+  margin: 0;
+  line-height: 1.7;
+}
+
+.login-form-hint em {
+  font-style: normal;
+  color: #8b1f2a;
+  font-weight: 600;
+  font-family: "Cormorant Garamond", "Georgia", serif;
+  letter-spacing: 0.04em;
+}
+
+.login-form .ant-form-item { margin-bottom: 22px; }
+.login-form .ant-form-item-label > label {
+  font-size: 12px;
+  color: #6b7280;
+  letter-spacing: 0.16em;
+  height: auto;
+}
+.login-form .ant-form-item-label > label::before { color: #8b1f2a !important; }
+
+.login-input.ant-input,
+.login-input.ant-input-affix-wrapper {
+  background: transparent !important;
+  border: none !important;
+  border-bottom: 1px solid #d4d2ce !important;
+  border-radius: 0 !important;
+  padding: 6px 0 !important;
+  font-size: 15px;
+  color: #1a1d24;
+  transition: border-color 200ms ease, box-shadow 200ms ease;
+  box-shadow: none !important;
+}
+
+.login-input.ant-input::placeholder,
+.login-input.ant-input-affix-wrapper input::placeholder { color: #b9b3a7; }
+
+.login-input.ant-input:focus,
+.login-input.ant-input-affix-wrapper-focused,
+.login-input.ant-input-affix-wrapper:focus-within {
+  border-bottom-color: #8b1f2a !important;
+  box-shadow: 0 1px 0 0 #8b1f2a !important;
+}
+
+.login-input.ant-input-affix-wrapper > input.ant-input {
+  background: transparent;
+  font-size: 15px;
+}
+
+.login-submit {
+  height: 48px;
+  margin-top: 12px;
+  background: #8b1f2a !important;
+  border-color: #8b1f2a !important;
+  border-radius: 4px !important;
+  font-weight: 500;
+  letter-spacing: 0.32em;
+  position: relative;
+  overflow: hidden;
+  transition: background 200ms ease, transform 120ms ease;
+}
+
+.login-submit:hover {
+  background: #6d1620 !important;
+  border-color: #6d1620 !important;
+}
+
+.login-submit:active { transform: translateY(1px); }
+
+.login-submit-arrow {
+  position: absolute;
+  right: 24px;
+  top: 50%;
+  transform: translate(8px, -50%);
+  opacity: 0;
+  transition: opacity 200ms ease, transform 200ms ease;
+  font-family: "Cormorant Garamond", serif;
+  font-size: 18px;
+  letter-spacing: 0;
+}
+
+.login-submit:hover .login-submit-arrow {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
+
+.login-form-foot {
+  margin-top: 32px;
+  font-size: 12px;
+  color: #a9a399;
+  letter-spacing: 0.06em;
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.login-form-foot-dot { color: #b8924a; }
+
+@keyframes loginFadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes loginFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (max-width: 900px) {
+  .login-page { grid-template-columns: 1fr; }
+  .login-stage { padding: 36px 32px; min-height: 320px; }
+  .login-quote-cn { font-size: 30px; }
+  .login-stage-bottom { gap: 28px; }
+  .login-form-side::before { display: none; }
+  .login-form-wrap { padding: 8px 32px 40px; }
+}
 
 /* ── Home Shell ── */
 .home-shell { min-height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
@@ -23,7 +356,7 @@ body { background: #f5f6f8; color: #1d2433; font-family: -apple-system, BlinkMac
 /* ── Home Topbar ── */
 .home-topbar { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 32px; background: #fff; border-bottom: 1px solid #e8ecf2; position: sticky; top: 0; z-index: 10; }
 .home-topbar-brand { display: flex; align-items: center; gap: 10px; }
-.home-topbar-logo { width: 30px; height: 30px; border-radius: 8px; background: linear-gradient(135deg, #3b6fd4, #5b8ef0); display: flex; align-items: center; justify-content: center; color: #fff; flex-shrink: 0; }
+.home-topbar-logo { width: 30px; height: 30px; border-radius: 50%; background: #8b1f2a; display: flex; align-items: center; justify-content: center; color: #f3e9d8; flex-shrink: 0; font-family: "Source Han Serif SC", "Songti SC", "SimSun", serif; font-size: 16px; font-weight: 700; line-height: 1; }
 .home-topbar-title { font-size: 15px; font-weight: 600; color: #1d2433; letter-spacing: -0.01em; }
 .home-topbar-actions { display: flex; align-items: center; gap: 8px; }
 .topbar-btn { display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 8px; border: 1px solid #dce2ed; background: #fff; color: #4a5568; font-size: 13px; cursor: pointer; transition: background 140ms, border-color 140ms, color 140ms; }

@@ -322,23 +322,63 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
   };
   return (
     <div className="login-page">
-      <div className="login-brand">
-        <div className="login-logo">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>
-          </svg>
+      <aside className="login-stage">
+        <div className="login-stage-top">
+          <div className="login-mark">
+            <span className="login-mark-cn">中</span>
+          </div>
+          <div className="login-stage-brand">
+            <div className="login-stage-brand-cn">中大咨询</div>
+            <div className="login-stage-brand-en">MPGroup · Management Consulting</div>
+          </div>
         </div>
-        <span>录音分析工作台</span>
-      </div>
-      <Card className="login-card">
-        <Title level={3} style={{ marginBottom: 4 }}>欢迎回来</Title>
-        <Paragraph type="secondary" style={{ marginBottom: 24 }}>请输入管理员创建的账号。默认管理员：admin / mp2026</Paragraph>
-        <Form layout="vertical" initialValues={{ username: 'admin', password: 'mp2026' }} onFinish={onFinish}>
-          <Form.Item name="username" label="账号" rules={[{ required: true }]}><Input size="large" /></Form.Item>
-          <Form.Item name="password" label="密码" rules={[{ required: true }]}><Input.Password size="large" /></Form.Item>
-          <Button type="primary" htmlType="submit" loading={loading} block size="large" style={{ marginTop: 8 }}>登录</Button>
-        </Form>
-      </Card>
+        <div className="login-stage-center">
+          <p className="login-quote-en">Listen to every strategic signal.</p>
+          <h1 className="login-quote-cn">听见每一次访谈中的<br />战略信号。</h1>
+          <div className="login-quote-divider" />
+          <p className="login-quote-sub">中大咨询 · 顾问访谈智能工作台</p>
+        </div>
+        <div className="login-stage-bottom">
+          <div className="login-stage-stat">
+            <span className="login-stage-stat-num">1993</span>
+            <span className="login-stage-stat-label">至今深耕管理咨询行业</span>
+          </div>
+          <div className="login-stage-stat">
+            <span className="login-stage-stat-num">30+</span>
+            <span className="login-stage-stat-label">服务行业领域</span>
+          </div>
+        </div>
+      </aside>
+      <section className="login-form-side">
+        <div className="login-form-topbar">
+          <span className="login-form-topbar-text">中文 / EN</span>
+        </div>
+        <div className="login-form-wrap">
+          <div className="login-form-heading">
+            <h2 className="login-form-title">洞见</h2>
+            <p className="login-form-subtitle">MP&nbsp;Insight</p>
+            <span className="login-form-rule" />
+            <p className="login-form-hint">欢迎回来，请使用管理员分配的账号登录。<br />内测期间默认账号：<em>admin</em> / <em>mp2026</em></p>
+          </div>
+          <Form className="login-form" layout="vertical" initialValues={{ username: 'admin', password: 'mp2026' }} onFinish={onFinish}>
+            <Form.Item name="username" label="账号" rules={[{ required: true, message: '请输入账号' }]}>
+              <Input size="large" variant="borderless" className="login-input" placeholder="请输入账号" />
+            </Form.Item>
+            <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>
+              <Input.Password size="large" variant="borderless" className="login-input" placeholder="请输入密码" />
+            </Form.Item>
+            <Button type="primary" htmlType="submit" loading={loading} block size="large" className="login-submit">
+              <span className="login-submit-text">登&nbsp;&nbsp;录</span>
+              <span className="login-submit-arrow" aria-hidden>→</span>
+            </Button>
+          </Form>
+          <div className="login-form-foot">
+            <span>© 2026 中大咨询集团</span>
+            <span className="login-form-foot-dot">·</span>
+            <span>MP Insight 内测版本</span>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -404,12 +444,8 @@ function Home({ me, usage, onOpenProject, onSettings, onAdmin, onLogout }: { me:
     <div className="home-shell">
       <header className="home-topbar">
         <div className="home-topbar-brand">
-          <div className="home-topbar-logo">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>
-            </svg>
-          </div>
-          <span className="home-topbar-title">录音分析工作台</span>
+          <div className="home-topbar-logo">中</div>
+          <span className="home-topbar-title">洞见 · MP Insight</span>
         </div>
         <div className="home-topbar-actions">
           <button className="topbar-btn" onClick={onSettings}><SettingOutlined /> 设置</button>
@@ -419,7 +455,7 @@ function Home({ me, usage, onOpenProject, onSettings, onAdmin, onLogout }: { me:
 
       <div className="home-hero">
         <div className="home-hero-inner">
-          <h1 className="home-hero-title">你的录音分析工作台</h1>
+          <h1 className="home-hero-title">洞见 · 顾问访谈智能工作台</h1>
           <p className="home-hero-sub">上传访谈录音，自动转写、生成纪要，并基于内容进行智能问答</p>
           <div className="home-search-row">
             <Input.Search
