@@ -16,10 +16,91 @@ class Project(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
+    owner_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    is_shared: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     recordings: Mapped[list["Recording"]] = relationship(cascade="all, delete-orphan", back_populates="project")
+    files: Mapped[list["ProjectFile"]] = relationship(cascade="all, delete-orphan", back_populates="project")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    username: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(128), default="")
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), default="user", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class UserQuota(Base):
+    __tablename__ = "user_quotas"
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    daily_asr_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    monthly_asr_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    daily_qa_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    monthly_qa_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ProjectMember(Base):
+    __tablename__ = "project_members"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ProjectFile(Base):
+    __tablename__ = "project_files"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    recording_id: Mapped[str | None] = mapped_column(ForeignKey("recordings.id"), nullable=True, index=True)
+    created_by_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    file_name: Mapped[str] = mapped_column(String(512), nullable=False)
+    file_type: Mapped[str] = mapped_column(String(64), default="audio", index=True)
+    object_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    storage_config_id: Mapped[str] = mapped_column(String(64), default="default")
+    storage_provider: Mapped[str] = mapped_column(String(64), default="")
+    storage_bucket_name: Mapped[str] = mapped_column(String(255), default="")
+    storage_endpoint: Mapped[str] = mapped_column(String(1024), default="")
+    storage_region: Mapped[str] = mapped_column(String(128), default="")
+    storage_path_prefix: Mapped[str] = mapped_column(String(512), default="")
+    mime_type: Mapped[str] = mapped_column(String(128), default="")
+    extension: Mapped[str] = mapped_column(String(32), default="")
+    file_size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    duration_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(64), default="created", index=True)
+    extraction_status: Mapped[str] = mapped_column(String(64), default="")
+    extracted_text: Mapped[str] = mapped_column(Text, default="")
+    extracted_char_count: Mapped[int] = mapped_column(Integer, default=0)
+    extraction_engine: Mapped[str] = mapped_column(String(255), default="")
+    extraction_warnings: Mapped[list] = mapped_column(JSON, default=list)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    project: Mapped[Project] = relationship(back_populates="files")
+
+
+class ProjectFileReference(Base):
+    __tablename__ = "project_file_references"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    target_project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    source_project_id: Mapped[str] = mapped_column(String(64), index=True)
+    source_file_id: Mapped[str] = mapped_column(String(64), index=True)
+    created_by_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(64), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Recording(Base):
@@ -58,6 +139,8 @@ class ProcessingJob(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     project_id: Mapped[str | None] = mapped_column(String(64), index=True)
     recording_id: Mapped[str | None] = mapped_column(ForeignKey("recordings.id"), nullable=True, index=True)
+    file_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     job_type: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(64), default="queued", index=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)
@@ -131,6 +214,7 @@ class QAThread(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(255), default="新对话")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -144,10 +228,12 @@ class QAMessage(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     thread_id: Mapped[str] = mapped_column(ForeignKey("qa_threads.id"), index=True)
     project_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     role: Mapped[str] = mapped_column(String(32), default="user")
     content: Mapped[str] = mapped_column(Text, default="")
     reasoning_content: Mapped[str] = mapped_column(Text, default="")
     selected_recording_ids: Mapped[list] = mapped_column(JSON, default=list)
+    selected_file_ids: Mapped[list] = mapped_column(JSON, default=list)
     sources: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(64), default="ready")
     usage: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -163,6 +249,8 @@ class UsageRecord(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     project_id: Mapped[str | None] = mapped_column(String(64), index=True)
     recording_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    file_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     job_id: Mapped[str | None] = mapped_column(String(64), index=True)
     call_type: Mapped[str] = mapped_column(String(64), index=True)
     model_provider: Mapped[str] = mapped_column(String(128), default="mock")

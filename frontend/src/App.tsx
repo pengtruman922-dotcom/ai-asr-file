@@ -4,7 +4,7 @@ import { Button, Card, Checkbox, Dropdown, Form, Input, InputNumber, Layout, Lis
 import { DeleteOutlined, DownloadOutlined, DownOutlined, EditOutlined, InboxOutlined, MoreOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
 import type { MenuProps, UploadFile } from 'antd';
 import { api, clearToken, formatDuration, formatMs, getToken, setToken } from './api';
-import type { AiTestResult, AppSettings, Job, Project, QAMessage, QAThread, Recording, StorageTestResult, TranscriptSegment } from './types';
+import type { AiTestResult, AppSettings, Job, MeUsage, Project, QAMessage, QAThread, Recording, StorageTestResult, TranscriptSegment, User, UserQuota } from './types';
 
 const { Header, Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
@@ -31,6 +31,8 @@ type RecordingStatus =
   | 'cleaning'
   | 'cleaning_completed'
   | 'summary_generating'
+  | 'extracting'
+  | 'extracted'
   | 'completed'
   | 'failed';
 
@@ -44,6 +46,8 @@ const RECORDING_STATUS_LABELS: Record<string, string> = {
   cleaning: '清洁稿生成中',
   cleaning_completed: '清洁稿完成',
   summary_generating: '纪要生成中',
+  extracting: '文字提取中',
+  extracted: '文字提取完成',
   completed: '处理完成',
   failed: '处理失败',
   // UI-only aliases kept for compatibility with visual refactors; business logic normalizes them first.
@@ -70,12 +74,14 @@ const PROCESSING_RECORDING_STATUSES = new Set<RecordingStatus>([
   'cleaning',
   'cleaning_completed',
   'summary_generating',
+  'extracting',
 ]);
 
 const JOB_TYPE_LABELS: Record<string, string> = {
   asr_transcription: 'ASR 转写',
   clean_transcript: '清洁稿生成',
   summary_generation: '纪要生成',
+  extract_text: '文字提取',
   qa_answer: '问答生成',
   export: '导出',
 };
@@ -147,7 +153,26 @@ function isRecordingReadyForQa(status?: string) {
 }
 
 function defaultQaSelection(recordings: Recording[]) {
-  return recordings.filter((item) => isRecordingReadyForQa(item.status)).slice(0, 10).map((item) => item.recording_id);
+  return recordings.filter((item) => isRecordingReadyForQa(item.status) && item.reference_status !== 'source_unshared' && item.reference_status !== 'source_deleted' && item.reference_status !== 'file_deleted').slice(0, 10).map(fileKey);
+}
+
+function fileKey(item: Recording) {
+  return item.file_id || item.recording_id;
+}
+
+function isAudioFile(item?: Recording | null) {
+  return !item?.file_type || item.file_type === 'audio';
+}
+
+function fileTypeLabel(type?: string) {
+  return ({
+    audio: '音频',
+    pdf: 'PDF',
+    excel: 'Excel',
+    docx: 'Word',
+    text: 'TXT',
+    markdown: 'Markdown',
+  } as Record<string, string>)[type || 'audio'] || type || '文件';
 }
 
 function elapsedSince(value?: string, now = Date.now()) {
@@ -177,7 +202,7 @@ function isSameIdSet(left: string[], right: string[]) {
 
 type QaStreamEvent = { event: string; data: Record<string, any> };
 
-async function postQaStream(threadId: string, payload: { recording_ids: string[]; question: string }, onEvent: (event: QaStreamEvent) => void) {
+async function postQaStream(threadId: string, payload: { file_ids: string[]; question: string }, onEvent: (event: QaStreamEvent) => void) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -224,17 +249,20 @@ function emitQaStreamBlock(block: string, onEvent: (event: QaStreamEvent) => voi
   onEvent({ event, data: JSON.parse(data) });
 }
 
-function parseHash(): { view: 'home' | 'project' | 'settings'; projectId: string | null } {
+function parseHash(): { view: 'home' | 'project' | 'settings' | 'admin'; projectId: string | null } {
   const hash = window.location.hash;
   const match = hash.match(/^#\/project\/([^/]+)$/);
   if (match) return { view: 'project', projectId: match[1] };
   if (hash === '#/settings') return { view: 'settings', projectId: null };
+  if (hash === '#/admin') return { view: 'admin', projectId: null };
   return { view: 'home', projectId: null };
 }
 
 function App() {
   const [token, setTokenState] = useState(getToken());
   const [{ view, projectId }, setNav] = useState(parseHash);
+  const [me, setMe] = useState<User | null>(null);
+  const [usage, setUsage] = useState<MeUsage | null>(null);
 
   useEffect(() => {
     const onHashChange = () => setNav(parseHash());
@@ -242,24 +270,39 @@ function App() {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  const navigate = (next: { view: 'home' | 'project' | 'settings'; projectId?: string }) => {
+  const loadMe = useCallback(async () => {
+    if (!getToken()) return;
+    const [user, usageData] = await Promise.all([
+      api<User>('/api/auth/me'),
+      api<MeUsage>('/api/me/usage').catch(() => null),
+    ]);
+    setMe(user);
+    if (usageData) setUsage(usageData);
+  }, []);
+
+  useEffect(() => { void loadMe().catch(() => undefined); }, [token, loadMe]);
+
+  const navigate = (next: { view: 'home' | 'project' | 'settings' | 'admin'; projectId?: string }) => {
     if (next.view === 'project' && next.projectId) {
       window.location.hash = `#/project/${next.projectId}`;
     } else if (next.view === 'settings') {
       window.location.hash = '#/settings';
+    } else if (next.view === 'admin') {
+      window.location.hash = '#/admin';
     } else {
       window.location.hash = '';
     }
     setNav({ view: next.view, projectId: next.projectId ?? null });
   };
 
-  if (!token) return <Login onLogin={(next) => { setToken(next); setTokenState(next); }} />;
+  if (!token) return <Login onLogin={(next) => { setToken(next); setTokenState(next); void loadMe(); }} />;
 
   return (
     <Layout className="app-shell">
-      {view === 'home' && <Home onOpenProject={(id) => navigate({ view: 'project', projectId: id })} onSettings={() => navigate({ view: 'settings' })} onLogout={() => { clearToken(); setTokenState(''); window.location.hash = ''; }} />}
+      {view === 'home' && <Home me={me} usage={usage} onOpenProject={(id) => navigate({ view: 'project', projectId: id })} onSettings={() => navigate({ view: 'settings' })} onAdmin={() => navigate({ view: 'admin' })} onLogout={() => { clearToken(); setTokenState(''); setMe(null); setUsage(null); window.location.hash = ''; }} />}
       {view === 'project' && projectId && <ProjectPage projectId={projectId} onBack={() => navigate({ view: 'home' })} />}
       {view === 'settings' && <SettingsPage onBack={() => navigate({ view: 'home' })} />}
+      {view === 'admin' && <AdminPage onBack={() => navigate({ view: 'home' })} />}
     </Layout>
   );
 }
@@ -289,7 +332,7 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
       </div>
       <Card className="login-card">
         <Title level={3} style={{ marginBottom: 4 }}>欢迎回来</Title>
-        <Paragraph type="secondary" style={{ marginBottom: 24 }}>MVP 登录：admin / mp2026</Paragraph>
+        <Paragraph type="secondary" style={{ marginBottom: 24 }}>请输入管理员创建的账号。默认管理员：admin / mp2026</Paragraph>
         <Form layout="vertical" initialValues={{ username: 'admin', password: 'mp2026' }} onFinish={onFinish}>
           <Form.Item name="username" label="账号" rules={[{ required: true }]}><Input size="large" /></Form.Item>
           <Form.Item name="password" label="密码" rules={[{ required: true }]}><Input.Password size="large" /></Form.Item>
@@ -300,7 +343,7 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
   );
 }
 
-function Home({ onOpenProject, onSettings, onLogout }: { onOpenProject: (id: string) => void; onSettings: () => void; onLogout: () => void }) {
+function Home({ me, usage, onOpenProject, onSettings, onAdmin, onLogout }: { me: User | null; usage: MeUsage | null; onOpenProject: (id: string) => void; onSettings: () => void; onAdmin: () => void; onLogout: () => void }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [keyword, setKeyword] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
@@ -370,7 +413,7 @@ function Home({ onOpenProject, onSettings, onLogout }: { onOpenProject: (id: str
         </div>
         <div className="home-topbar-actions">
           <button className="topbar-btn" onClick={onSettings}><SettingOutlined /> 设置</button>
-          <button className="topbar-btn topbar-btn-ghost" onClick={onLogout}>退出</button>
+          <UserUsageDropdown me={me} usage={usage} onAdmin={onAdmin} onLogout={onLogout} />
         </div>
       </header>
 
@@ -413,7 +456,7 @@ function Home({ onOpenProject, onSettings, onLogout }: { onOpenProject: (id: str
             onRow={(record) => ({ onClick: () => onOpenProject(record.project_id) })}
             columns={[
               { title: '项目', dataIndex: 'title', render: (value: string) => <Text strong>{value}</Text> },
-              { title: '文件数量', dataIndex: 'recording_count', width: 120, render: (value: number) => value ?? 0 },
+              { title: '文件数量', dataIndex: 'file_count', width: 120, render: (value: number, record: Project) => value ?? record.recording_count ?? 0 },
               { title: '总时长(h)', dataIndex: 'total_duration_seconds', width: 140, render: (value: number) => ((value || 0) / 3600).toFixed(1) },
               { title: '最近更新', dataIndex: 'updated_at', width: 160, render: formatDate },
               { title: '', width: 60, render: (_, record) => <Dropdown menu={actionMenu(record)} trigger={['click']}><Button type="text" icon={<MoreOutlined />} onClick={(e) => e.stopPropagation()} /></Dropdown> },
@@ -472,12 +515,47 @@ function Home({ onOpenProject, onSettings, onLogout }: { onOpenProject: (id: str
   );
 }
 
+function UserUsageDropdown({ me, usage, onAdmin, onLogout }: { me: User | null; usage: MeUsage | null; onAdmin: () => void; onLogout: () => void }) {
+  const quota = usage?.quota;
+  const dailyAsrLimit = quota?.daily_asr_seconds || 0;
+  const monthlyAsrLimit = quota?.monthly_asr_seconds || 0;
+  const dailyQaLimit = quota?.daily_qa_tokens || 0;
+  const monthlyQaLimit = quota?.monthly_qa_tokens || 0;
+  const card = <div className="usage-dropdown-card">
+    <Text strong>{me?.display_name || me?.username || '当前用户'}</Text>
+    <Text type="secondary">{me?.role === 'admin' ? '管理员' : '普通用户'}</Text>
+    <UsageProgress label="今日 ASR" value={usage?.today.asr_seconds || 0} limit={dailyAsrLimit} formatter={formatDuration} />
+    <UsageProgress label="本月 ASR" value={usage?.month.asr_seconds || 0} limit={monthlyAsrLimit} formatter={formatDuration} />
+    <UsageProgress label="今日问答 Token" value={usage?.today.qa_tokens || 0} limit={dailyQaLimit} />
+    <UsageProgress label="本月问答 Token" value={usage?.month.qa_tokens || 0} limit={monthlyQaLimit} />
+    <Space direction="vertical" style={{ width: '100%' }}>
+      {me?.role === 'admin' && <Button block onClick={onAdmin}>管理后台</Button>}
+      <Button block onClick={onLogout}>退出</Button>
+    </Space>
+  </div>;
+  return <Dropdown dropdownRender={() => card} trigger={['click']} placement="bottomRight">
+    <button className="topbar-btn topbar-btn-ghost">{me?.display_name || me?.username || '用户'} <DownOutlined /></button>
+  </Dropdown>;
+}
+
+function UsageProgress({ label, value, limit, formatter }: { label: string; value: number; limit: number; formatter?: (value: number) => string }) {
+  const percent = limit ? Math.min(100, Math.round((value / limit) * 100)) : 0;
+  const valueLabel = formatter ? formatter(value) : `${value}`;
+  const limitLabel = limit ? (formatter ? formatter(limit) : `${limit}`) : '不限';
+  return <div className="usage-progress-row">
+    <div className="usage-progress-label"><Text>{label}</Text><Text type="secondary">{valueLabel} / {limitLabel}</Text></div>
+    <Progress percent={percent} size="small" showInfo={false} status={limit && percent >= 90 ? 'exception' : 'normal'} />
+  </div>;
+}
+
 function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => void }) {
   const [project, setProject] = useState<Project | null>(null);
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<string[]>([]);
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
+  const [extractedText, setExtractedText] = useState('');
+  const [fileDetail, setFileDetail] = useState<Recording | null>(null);
   const [showRaw, setShowRaw] = useState(false);
   const [summary, setSummary] = useState<any>(null);
   const [threads, setThreads] = useState<QAThread[]>([]);
@@ -488,6 +566,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const [qaStreaming, setQaStreaming] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);
+  const [sharedOpen, setSharedOpen] = useState(false);
   const [columnWidths, setColumnWidths] = useState<ProjectColumnWidths>(loadProjectColumnWidths);
   const [activeResize, setActiveResize] = useState<ResizeDivider | null>(null);
   const [clockNow, setClockNow] = useState(() => Date.now());
@@ -497,20 +577,20 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const restoredThreadSelectionRef = useRef<string | null>(null);
   const qaSelectionWarnedRef = useRef(false);
 
-  const selectedRecording = recordings.find((item) => item.recording_id === selectedId) || null;
+  const selectedRecording = recordings.find((item) => fileKey(item) === selectedId) || null;
   const selectedRecordingId = selectedRecording?.recording_id || null;
-  const selectedRecordingPlayable = isRecordingPlayable(selectedRecording?.status);
+  const selectedRecordingPlayable = isAudioFile(selectedRecording) && isRecordingPlayable(selectedRecording?.status);
   const pendingQaAnswer = messages.some((item) => item.role === 'assistant' && ['queued', 'running'].includes(item.status));
 
   const loadProject = useCallback(async () => {
     const [p, r] = await Promise.all([
       api<Project>(`/api/projects/${projectId}`),
-      api<{ items: Recording[] }>(`/api/projects/${projectId}/recordings?page_size=100`)
+      api<{ items: Recording[] }>(`/api/projects/${projectId}/files?page_size=100`)
     ]);
     setProject(p);
     setRecordings(r.items);
-    if (!selectedId && r.items.length) setSelectedId(r.items[0].recording_id);
-    const completedIds = new Set(r.items.filter((item) => isRecordingReadyForQa(item.status)).map((item) => item.recording_id));
+    if (!selectedId && r.items.length) setSelectedId(fileKey(r.items[0]));
+    const completedIds = new Set(r.items.filter((item) => isRecordingReadyForQa(item.status)).map(fileKey));
     const defaultIds = defaultQaSelection(r.items);
     if (!selectionTouchedRef.current) {
       setCheckedIds((prev) => isSameIdSet(prev, defaultIds) ? prev : defaultIds);
@@ -520,14 +600,24 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   }, [projectId, selectedId]);
 
   const loadSelected = useCallback(async () => {
-    if (!selectedId) return;
-    const [transcript, sum] = await Promise.all([
-      api<{ segments: TranscriptSegment[] }>(`/api/recordings/${selectedId}/transcript?source=clean`),
-      api<any>(`/api/recordings/${selectedId}/summary`)
-    ]);
-    setSegments(transcript.segments || []);
-    setSummary(sum);
-  }, [selectedId]);
+    if (!selectedId || !selectedRecording) return;
+    setExtractedText('');
+    setFileDetail(selectedRecording);
+    if (isAudioFile(selectedRecording) && selectedRecording.recording_id) {
+      const [transcript, sum] = await Promise.all([
+        api<{ segments: TranscriptSegment[] }>(`/api/recordings/${selectedRecording.recording_id}/transcript?source=clean`),
+        api<any>(`/api/recordings/${selectedRecording.recording_id}/summary`)
+      ]);
+      setSegments(transcript.segments || []);
+      setSummary(sum);
+      return;
+    }
+    setSegments([]);
+    setSummary(null);
+    const detail = await api<Recording & { extracted_text: string }>(`/api/files/${selectedRecording.file_id}/extracted-text`);
+    setFileDetail(detail);
+    setExtractedText(detail.extracted_text || '');
+  }, [selectedId, selectedRecording?.file_id, selectedRecording?.recording_id, selectedRecording?.status]);
 
   const loadThreads = useCallback(async () => {
     const data = await api<{ items: QAThread[] }>(`/api/projects/${projectId}/qa-threads`);
@@ -541,7 +631,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     const nextMessages = data.messages || [];
     setMessages(nextMessages);
     if (restoredThreadSelectionRef.current !== currentThreadId) {
-      const lastSelection = [...nextMessages].reverse().find((item) => item.selected_recording_ids?.length)?.selected_recording_ids || [];
+      const lastMessage = [...nextMessages].reverse().find((item) => item.selected_file_ids?.length || item.selected_recording_ids?.length);
+      const lastSelection = lastMessage?.selected_file_ids?.length ? lastMessage.selected_file_ids : (lastMessage?.selected_recording_ids || []);
       if (lastSelection.length) {
         selectionTouchedRef.current = true;
         setCheckedIds(lastSelection.slice(0, 10));
@@ -654,9 +745,9 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   } as CSSProperties;
 
   const jumpTo = async (ms: number) => {
-    if (!audioRef.current || !selectedId) return;
+    if (!audioRef.current || !selectedRecording?.recording_id || !isAudioFile(selectedRecording)) return;
     if (!audioRef.current.src) {
-      const data = await api<{ url: string }>(`/api/recordings/${selectedId}/play-url`, { method: 'POST' });
+      const data = await api<{ url: string }>(`/api/recordings/${selectedRecording.recording_id}/play-url`, { method: 'POST' });
       audioRef.current.src = data.url;
     }
     audioRef.current.currentTime = ms / 1000;
@@ -674,7 +765,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
       }),
     });
     if (selectedId) {
-      setRecordings((prev) => prev.map((item) => item.recording_id === selectedId ? { ...item, summary_stale: true } : item));
+      setRecordings((prev) => prev.map((item) => fileKey(item) === selectedId ? { ...item, summary_stale: true } : item));
     }
     setSummary((prev: any) => prev ? { ...prev, stale: true } : prev);
     message.success(result.updated_count && result.updated_count > 1 ? `已保存并替换 ${result.updated_count} 段，纪要已标记为过期` : '已保存，纪要已标记为过期');
@@ -683,8 +774,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   };
 
   const regenerateSummary = async () => {
-    if (!selectedId) return;
-    await api(`/api/recordings/${selectedId}/summary/regenerate`, { method: 'POST', body: JSON.stringify({}) });
+    if (!selectedRecording?.recording_id || !isAudioFile(selectedRecording)) return;
+    await api(`/api/recordings/${selectedRecording.recording_id}/summary/regenerate`, { method: 'POST', body: JSON.stringify({}) });
     message.success('已提交重新生成纪要任务');
     setTimeout(() => { void loadProject(); void loadSelected(); }, 1000);
   };
@@ -704,12 +795,12 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     if (!question) return message.warning('请输入问题');
     if (pendingQaAnswer) return message.warning('AI 正在回答，完成后可继续提问');
     if (qaSubmitting) return;
-    const readyIds = new Set(recordings.filter((item) => isRecordingReadyForQa(item.status)).map((item) => item.recording_id));
-    const qaRecordingIds = checkedIds.filter((id) => readyIds.has(id)).slice(0, 10);
-    if (!qaRecordingIds.length) return message.warning('请先勾选已处理完成的录音');
+    const readyIds = new Set(recordings.filter((item) => isRecordingReadyForQa(item.status)).map(fileKey));
+    const qaFileIds = checkedIds.filter((id) => readyIds.has(id)).slice(0, 10);
+    if (!qaFileIds.length) return message.warning('请先勾选已处理完成的文件');
     const completedCount = readyIds.size;
     const defaultFirstTen = defaultQaSelection(recordings);
-    const isUsingDefaultFirstTen = completedCount > 10 && isSameIdSet(qaRecordingIds, defaultFirstTen);
+    const isUsingDefaultFirstTen = completedCount > 10 && isSameIdSet(qaFileIds, defaultFirstTen);
     if (!qaSelectionWarnedRef.current && isUsingDefaultFirstTen) {
       Modal.confirm({
         title: '确认参考文件范围',
@@ -734,13 +825,13 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     setQaQuestion('');
     setMessages((prev) => [
       ...prev,
-      { message_id: tmpUserId, thread_id: threadId!, role: 'user', content: question, selected_recording_ids: qaRecordingIds, sources: [], status: 'ready', created_at: now },
-      { message_id: tmpAiId, thread_id: threadId!, role: 'assistant', content: '', reasoning_content: '', selected_recording_ids: qaRecordingIds, sources: [], status: 'running', created_at: now },
+      { message_id: tmpUserId, thread_id: threadId!, role: 'user', content: question, selected_recording_ids: [], selected_file_ids: qaFileIds, sources: [], status: 'ready', created_at: now },
+      { message_id: tmpAiId, thread_id: threadId!, role: 'assistant', content: '', reasoning_content: '', selected_recording_ids: [], selected_file_ids: qaFileIds, sources: [], status: 'running', created_at: now },
     ]);
     setQaSubmitting(true);
     setQaStreaming(true);
     try {
-      await postQaStream(threadId, { recording_ids: qaRecordingIds, question }, ({ event, data }) => {
+      await postQaStream(threadId, { file_ids: qaFileIds, question }, ({ event, data }) => {
         if (event === 'created') {
           userMessageId = String(data.user_message_id || userMessageId);
           assistantMessageId = String(data.assistant_message_id || assistantMessageId);
@@ -783,15 +874,42 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   };
 
   const deleteRecording = async (id: string) => {
-    Modal.confirm({ title: '确认硬删除录音？', content: '将同时删除录音文件、转写稿、纪要和相关任务。', okText: '确认删除', okButtonProps: { danger: true }, onOk: async () => { await api(`/api/recordings/${id}`, { method: 'DELETE' }); message.success('已删除'); setSelectedId(null); void loadProject(); } });
+    Modal.confirm({ title: '确认硬删除文件？', content: '将同时删除原始文件、处理结果和相关任务。若被其他项目引用，需在提示后再次确认。', okText: '确认删除', okButtonProps: { danger: true }, onOk: async () => { const deleted = await deleteFileWithConfirm(id); if (deleted) { message.success('已删除'); setSelectedId(null); void loadProject(); } } });
   };
 
   const renameRecording = async (id: string, fileName: string) => {
     const nextName = fileName.trim();
     if (!nextName) return message.warning('文件名称不能为空');
-    await api(`/api/recordings/${id}`, { method: 'PATCH', body: JSON.stringify({ file_name: nextName }) });
+    const file = recordings.find((item) => fileKey(item) === id);
+    if (file?.recording_id && isAudioFile(file)) {
+      await api(`/api/recordings/${file.recording_id}`, { method: 'PATCH', body: JSON.stringify({ file_name: nextName }) });
+    } else {
+      await api(`/api/files/${id}`, { method: 'PATCH', body: JSON.stringify({ file_name: nextName }) });
+    }
     message.success('文件名已保存');
     void loadProject();
+  };
+
+  const deleteFileWithConfirm = async (id: string, force = false): Promise<boolean> => {
+    try {
+      await api(`/api/files/${id}${force ? '?force=true' : ''}`, { method: 'DELETE' });
+      return true;
+    } catch (err) {
+      const text = err instanceof Error ? err.message : '';
+      if (!force && text.includes('引用')) {
+        return new Promise((resolve) => {
+          Modal.confirm({
+            title: '该文件已被其他项目引用',
+            content: '删除后，其他项目中的引用文件将不可用。是否继续？',
+            okText: '继续删除',
+            okButtonProps: { danger: true },
+            onOk: async () => { resolve(await deleteFileWithConfirm(id, true)); },
+            onCancel: () => resolve(false),
+          });
+        });
+      }
+      throw err;
+    }
   };
 
   const retryFailedRecording = async (jobId?: string) => {
@@ -807,13 +925,13 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     setCheckedIds((prev) => {
       if (!checked) return prev.filter((item) => item !== id);
       if (prev.includes(id)) return prev;
-      const recording = recordings.find((item) => item.recording_id === id);
+      const recording = recordings.find((item) => fileKey(item) === id);
       if (!isRecordingReadyForQa(recording?.status)) {
-        message.warning('只有处理完成的录音可以用于问答');
+        message.warning('只有处理完成的文件可以用于问答');
         return prev;
       }
       if (prev.length >= 10) {
-        message.warning('最多选择 10 份录音用于问答');
+        message.warning('最多选择 10 份文件用于问答');
         return prev;
       }
       return [...prev, id];
@@ -821,12 +939,26 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   };
 
   const deleteProject = () => {
-    Modal.confirm({ title: '确认硬删除项目？', content: '将删除项目下所有录音、文件、纪要和问答历史。', okText: '确认删除', okButtonProps: { danger: true }, onOk: async () => { await api(`/api/projects/${projectId}`, { method: 'DELETE' }); message.success('项目已删除'); onBack(); } });
+    const doDelete = async (force = false) => {
+      try {
+        await api(`/api/projects/${projectId}${force ? '?force=true' : ''}`, { method: 'DELETE' });
+        message.success('项目已删除');
+        onBack();
+      } catch (err) {
+        const text = err instanceof Error ? err.message : '';
+        if (!force && text.includes('引用')) {
+          Modal.confirm({ title: '该项目文件已被引用', content: '删除后，其他项目中的引用文件将不可用。是否继续？', okText: '继续删除', okButtonProps: { danger: true }, onOk: () => doDelete(true) });
+          return;
+        }
+        message.error(text || '删除失败');
+      }
+    };
+    Modal.confirm({ title: '确认硬删除项目？', content: '将删除项目下所有录音、文件、纪要和问答历史。', okText: '确认删除', okButtonProps: { danger: true }, onOk: () => doDelete(false) });
   };
 
   const exportMd = async (type: 'summary' | 'transcript') => {
-    if (!selectedId) return;
-    const data = await api<{ download_url: string; filename?: string; content?: string }>(`/api/recordings/${selectedId}/exports`, { method: 'POST', body: JSON.stringify({ export_type: type, format: 'markdown' }) });
+    if (!selectedRecording?.recording_id || !isAudioFile(selectedRecording)) return;
+    const data = await api<{ download_url: string; filename?: string; content?: string }>(`/api/recordings/${selectedRecording.recording_id}/exports`, { method: 'POST', body: JSON.stringify({ export_type: type, format: 'markdown' }) });
     if (data.content !== undefined) {
       downloadTextFile(data.content, data.filename || `${type}.md`);
       return;
@@ -856,21 +988,21 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
       </div>
       <div ref={workspaceRef} className={`workspace-grid ${activeResize ? 'resizing' : ''}`} style={workspaceStyle}>
         <aside className="left-panel panel-scroll">
-          <Space className="panel-actions"><Button type="primary" icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>上传录音</Button><Button onClick={() => setQueueOpen(true)}>处理队列</Button></Space>
+          <Space className="panel-actions"><Button type="primary" icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>上传文件</Button><Button onClick={() => setQueueOpen(true)}>处理队列</Button><Button onClick={() => setMembersOpen(true)}>成员</Button><Button onClick={() => setSharedOpen(true)}>共享文件</Button></Space>
           <Text type="secondary">文件数量 {recordings.length}/30</Text>
           {recordings.length >= 30 && <Tag color="orange">已达到建议上限</Tag>}
           <List dataSource={recordings} locale={{ emptyText: '暂无文件' }} renderItem={(rec) => (
             <RecordingListItem
               recording={rec}
-              active={rec.recording_id === selectedId}
-              checked={checkedIds.includes(rec.recording_id)}
-              checkDisabled={!isRecordingReadyForQa(rec.status)}
+              active={fileKey(rec) === selectedId}
+              checked={checkedIds.includes(fileKey(rec))}
+              checkDisabled={!isRecordingReadyForQa(rec.status) || ['source_unshared', 'source_deleted', 'file_deleted'].includes(rec.reference_status || '')}
               clockNow={clockNow}
-              onSelect={() => setSelectedId(rec.recording_id)}
-              onCheck={(checked) => toggleRecordingCheck(rec.recording_id, checked)}
-              onRename={(name) => renameRecording(rec.recording_id, name)}
+              onSelect={() => setSelectedId(fileKey(rec))}
+              onCheck={(checked) => toggleRecordingCheck(fileKey(rec), checked)}
+              onRename={(name) => renameRecording(fileKey(rec), name)}
               onRetry={(jobId) => retryFailedRecording(jobId)}
-              onDelete={() => deleteRecording(rec.recording_id)}
+              onDelete={() => deleteRecording(fileKey(rec))}
             />
           )} />
           <Text type="secondary">已选 {checkedIds.length} / 最多 10 份用于问答</Text>
@@ -879,7 +1011,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
         <main className="middle-panel">
           <div className="middle-toolbar">
             <div className="middle-toolbar-info">
-              <Text strong className="toolbar-filename">{selectedRecording?.file_name || '请选择录音'}</Text>
+              <Text strong className="toolbar-filename">{selectedRecording?.file_name || '请选择文件'}</Text>
               {selectedRecording && (
                 <span className={`status-dot-label status-${recordingStatusClass(selectedRecording.status)}`}>
                   <span className="status-dot" />
@@ -889,25 +1021,29 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
               )}
             </div>
             <Space size={6} className="middle-toolbar-actions">
-              <Button size="small" onClick={() => setShowRaw((v) => !v)}>{showRaw ? '隐藏原始稿' : '显示原始稿'}</Button>
-              <Button size="small" icon={<DownloadOutlined />} onClick={() => exportMd('transcript')}>导出清洁稿</Button>
+              {isAudioFile(selectedRecording) && <Button size="small" onClick={() => setShowRaw((v) => !v)}>{showRaw ? '隐藏原始稿' : '显示原始稿'}</Button>}
+              {isAudioFile(selectedRecording) && <Button size="small" icon={<DownloadOutlined />} onClick={() => exportMd('transcript')}>导出清洁稿</Button>}
             </Space>
           </div>
           <div className="transcript-list panel-scroll">
-            {segments.map((seg) => <SegmentEditor key={seg.segment_id} segment={seg} showRaw={showRaw} onJump={jumpTo} onSave={saveSegment} />)}
+            {isAudioFile(selectedRecording)
+              ? segments.map((seg) => <SegmentEditor key={seg.segment_id} segment={seg} showRaw={showRaw} onJump={jumpTo} onSave={saveSegment} />)
+              : <ExtractedTextView text={extractedText} file={fileDetail || selectedRecording} />}
           </div>
           <div className="player"><audio ref={audioRef} controls /><Text type="secondary" className="player-hint">{selectedRecording ? selectedRecordingPlayable ? '原始音频可播放' : selectedRecording.status === 'uploading' ? '上传完成后可播放' : '暂无可播放音频' : '请选择录音'}</Text></div>
         </main>
         <ColumnResizeHandle side="right" active={activeResize === 'right'} onPointerDown={(event) => startColumnResize('right', event)} onDoubleClick={resetColumnWidths} />
         <aside className="right-panel panel-scroll">
           <Tabs defaultActiveKey="summary" items={[
-            { key: 'summary', label: '纪要', children: <SummaryView summary={summary} stale={selectedRecording?.summary_stale || summary?.stale} onExport={() => exportMd('summary')} onRegenerate={regenerateSummary} /> },
+            { key: 'summary', label: isAudioFile(selectedRecording) ? '纪要' : '文件信息', children: isAudioFile(selectedRecording) ? <SummaryView summary={summary} stale={selectedRecording?.summary_stale || summary?.stale} onExport={() => exportMd('summary')} onRegenerate={regenerateSummary} /> : <FileInfoView file={fileDetail || selectedRecording} /> },
             { key: 'qa', label: '问答', children: <QAView checked={checkedIds} recordings={recordings} threads={threads} currentThreadId={currentThreadId} setCurrentThreadId={setCurrentThreadId} messages={messages} question={qaQuestion} setQuestion={setQaQuestion} onAsk={ask} onNewThread={createThread} submitting={qaSubmitting} waitingForAnswer={pendingQaAnswer} /> }
           ]} />
         </aside>
       </div>
       <UploadModal open={uploadOpen} projectId={projectId} onClose={() => setUploadOpen(false)} onCreated={(id) => { setSelectedId(id); void loadProject(); }} onDone={() => { setUploadOpen(false); void loadProject(); }} />
       <QueueModal open={queueOpen} projectId={projectId} clockNow={clockNow} onClose={() => setQueueOpen(false)} onRefresh={() => { void loadProject(); void loadSelected(); }} />
+      <MembersModal open={membersOpen} projectId={projectId} project={project} onClose={() => setMembersOpen(false)} onRefresh={() => { void loadProject(); }} />
+      <SharedFilesModal open={sharedOpen} projectId={projectId} onClose={() => setSharedOpen(false)} onAdded={() => { void loadProject(); }} />
     </div>
   );
 }
@@ -934,7 +1070,14 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
     submittedNameRef.current = '';
   }, [recording.file_name]);
   const failedStage = recording.latest_failed_job_type ? jobTypeLabel(recording.latest_failed_job_type) : '';
-  const mediaMeta = [`音频时长 ${formatDuration(recording.duration_seconds)}`, formatFileSize(recording.file_size_bytes)].filter(Boolean).join(' · ');
+  const mediaMeta = [
+    fileTypeLabel(recording.file_type),
+    isAudioFile(recording) && recording.duration_seconds ? `音频时长 ${formatDuration(recording.duration_seconds)}` : '',
+    !isAudioFile(recording) && recording.extracted_char_count ? `提取 ${recording.extracted_char_count} 字` : '',
+    formatFileSize(recording.file_size_bytes),
+    recording.source === 'reference' ? '引用文件' : '',
+  ].filter(Boolean).join(' · ');
+  const unavailable = ['source_unshared', 'source_deleted', 'file_deleted'].includes(recording.reference_status || '');
   const save = () => {
     if (skipBlurSaveRef.current) {
       skipBlurSaveRef.current = false;
@@ -972,6 +1115,7 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
           {isRecordingProcessing(recording.status) && <Text type="secondary">已处理 {elapsedSince(recordingTimerStart(recording), clockNow)}</Text>}
           {recording.status === 'failed' && failedStage && <Tag color="red">失败阶段：{failedStage}</Tag>}
         </Space>
+        {unavailable && <Tag color="red">来源已不可用</Tag>}
         {recording.status === 'failed' && recording.latest_failed_job_error_message && <Text type="secondary" className="recording-error" title={recording.latest_failed_job_error_message}>{recording.latest_failed_job_error_message}</Text>}
         <Text type="secondary" className="recording-meta">{mediaMeta}</Text>
         {recording.status === 'failed' && <Button size="small" type="link" className="recording-retry" onClick={(e) => { e.stopPropagation(); void onRetry(recording.latest_failed_job_id); }}>重试{failedStage ? ` ${failedStage}` : ''}</Button>}
@@ -1029,6 +1173,27 @@ function SummaryView({ summary, stale, onExport, onRegenerate }: { summary: any;
   </Space>;
 }
 
+function ExtractedTextView({ text, file }: { text: string; file: Recording | null }) {
+  if (!file) return <div className="empty-doc-text">请选择文件</div>;
+  if (isRecordingProcessing(file.status)) return <div className="empty-doc-text">正在提取文字，请稍后...</div>;
+  if (file.status === 'failed') return <div className="empty-doc-text">文字提取失败，请在左侧点击重试。</div>;
+  return <div className="extracted-text-panel">
+    <pre>{text || '暂无提取文字稿'}</pre>
+  </div>;
+}
+
+function FileInfoView({ file }: { file: Recording | null }) {
+  if (!file) return <Text type="secondary">请选择文件</Text>;
+  return <Space direction="vertical" style={{ width: '100%' }}>
+    <Tag color="blue">{fileTypeLabel(file.file_type)}</Tag>
+    <Paragraph><Text strong>文件名：</Text>{file.file_name}</Paragraph>
+    <Paragraph><Text strong>处理状态：</Text>{recordingStatusLabel(file.status)}</Paragraph>
+    <Paragraph><Text strong>提取引擎：</Text>{file.extraction_engine || '-'}</Paragraph>
+    <Paragraph><Text strong>提取字数：</Text>{file.extracted_char_count || 0}</Paragraph>
+    {(file.extraction_warnings || []).map((warning, index) => <Tag color="orange" key={index}>{warning}</Tag>)}
+  </Space>;
+}
+
 function MarkdownLite({ markdown }: { markdown: string }) {
   return <div className="markdown-body">{markdown.split('\n').map((line, index) => {
     if (line.startsWith('### ')) return <Title level={5} key={index}>{line.slice(4)}</Title>;
@@ -1042,7 +1207,7 @@ function MarkdownLite({ markdown }: { markdown: string }) {
 }
 
 function QAView({ checked, recordings, threads, currentThreadId, setCurrentThreadId, messages, question, setQuestion, onAsk, onNewThread, submitting, waitingForAnswer }: { checked: string[]; recordings: Recording[]; threads: QAThread[]; currentThreadId: string | null; setCurrentThreadId: (id: string) => void; messages: QAMessage[]; question: string; setQuestion: (v: string) => void; onAsk: () => void; onNewThread: () => void; submitting: boolean; waitingForAnswer: boolean }) {
-  const selectedNames = recordings.filter((r) => checked.includes(r.recording_id)).map((r) => r.file_name);
+  const selectedNames = recordings.filter((r) => checked.includes(fileKey(r))).map((r) => r.file_name);
   const readyCount = recordings.filter((r) => isRecordingReadyForQa(r.status)).length;
   return <Space direction="vertical" style={{ width: '100%' }}>
     <Space.Compact style={{ width: '100%' }}>
@@ -1057,7 +1222,7 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
       />
     </Space.Compact>
     <Tag color="blue">当前勾选：{checked.length} 份</Tag>
-    <Paragraph type="secondary">{selectedNames.length ? selectedNames.join(' / ') : readyCount ? '请在左侧勾选已处理完成的参考文件' : '暂无处理完成的录音可用于问答'}</Paragraph>
+    <Paragraph type="secondary">{selectedNames.length ? selectedNames.join(' / ') : readyCount ? '请在左侧勾选已处理完成的参考文件' : '暂无处理完成的文件可用于问答'}</Paragraph>
     <div className="qa-messages">
       {messages.map((item) => <Card key={item.message_id} size="small" className={item.role === 'user' ? 'qa-user' : 'qa-assistant'}>
         <Text strong>{item.role === 'user' ? '用户' : 'AI'}</Text>
@@ -1066,7 +1231,7 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
           <pre>{item.reasoning_content}</pre>
         </details>}
         {item.status === 'failed' ? <Paragraph type="danger">{item.content || '生成失败，请稍后重试'}</Paragraph> : <MarkdownLite markdown={item.content || (['queued', 'running'].includes(item.status) ? '生成中...' : item.status)} />}
-        {item.role === 'assistant' && <Paragraph type="secondary">本轮参考材料：{item.selected_recording_ids?.length || 0} 份</Paragraph>}
+        {item.role === 'assistant' && <Paragraph type="secondary">本轮参考材料：{item.selected_file_ids?.length || item.selected_recording_ids?.length || 0} 份</Paragraph>}
         {(item.sources || []).slice(0, 3).map((s, idx) => <Paragraph type="secondary" key={idx}>来源：{s.file_name} {formatMs(s.start_time_ms)} - {s.quote}</Paragraph>)}
       </Card>)}
     </div>
@@ -1076,7 +1241,7 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
   </Space>;
 }
 
-function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: boolean; projectId: string; onClose: () => void; onCreated: (recordingId: string) => void; onDone: () => void }) {
+function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: boolean; projectId: string; onClose: () => void; onCreated: (fileId: string) => void; onDone: () => void }) {
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
@@ -1096,16 +1261,17 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
     setUploading(true);
     setUploadError('');
     try {
-      const duration = await readAudioDuration(file);
-      if (duration && duration > limits.max_recording_duration_hours * 3600) {
+      const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      const audio = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'wma'].includes(ext);
+      const duration = audio ? await readAudioDuration(file) : null;
+      if (audio && duration && duration > limits.max_recording_duration_hours * 3600) {
         message.error(`文件时长超过 ${limits.max_recording_duration_hours} 小时`);
         return;
       }
-      const ext = file.name.split('.').pop()?.toLowerCase() || '';
       const speakerCount = speakerMode === 'auto' ? 'auto' : speakerMode;
       setProgress(0);
-      const session = await api<any>(`/api/projects/${projectId}/recordings/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: duration ? Math.round(duration) : 0, template_type: 'customer_interview', speaker_count: speakerCount }) });
-      onCreated(session.recording_id);
+      const session = await api<any>(`/api/projects/${projectId}/files/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: audio && duration ? Math.round(duration) : 0, template_type: 'customer_interview', speaker_count: speakerCount }) });
+      onCreated(session.file_id);
       const form = new FormData();
       form.append('file', file);
       form.append('speaker_count', speakerCount);
@@ -1115,7 +1281,7 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
         closedAfterClientUpload = true;
         onDone();
       };
-      await postFormWithProgress(`/api/recordings/${session.recording_id}/upload-content`, form, (value) => {
+      await postFormWithProgress(`/api/files/${session.file_id}/upload-content`, form, (value) => {
         setProgress(value);
         if (value >= 100) {
           message.loading('文件已上传，正在保存到云存储...', 1.5);
@@ -1135,13 +1301,15 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
       setUploading(false);
     }
   };
-  return <Modal title="上传录音" open={open} onCancel={uploading ? undefined : onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}>
+  const selectedExt = (files[0]?.name || '').split('.').pop()?.toLowerCase() || '';
+  const selectedIsAudio = !selectedExt || ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'wma'].includes(selectedExt);
+  return <Modal title="上传文件" open={open} onCancel={uploading ? undefined : onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}>
     <Upload.Dragger beforeUpload={() => false} maxCount={1} fileList={files} onChange={(info) => { setFiles(info.fileList); setUploadError(''); }} disabled={uploading}>
       <p className="ant-upload-drag-icon"><InboxOutlined /></p>
       <p>拖拽文件到此处，或点击选择文件</p>
-      <p>支持 mp3 / wav / m4a / aac / flac / ogg / wma，单文件最大 {limits.max_upload_size_mb}MB，时长上限 {limits.max_recording_duration_hours} 小时</p>
+      <p>支持音频、PDF、Excel、Word docx、TXT/MD，单文件最大 {limits.max_upload_size_mb}MB；音频时长上限 {limits.max_recording_duration_hours} 小时</p>
     </Upload.Dragger>
-    <div className="upload-speaker-setting">
+    {selectedIsAudio && <div className="upload-speaker-setting">
       <Text strong>说话人数量</Text>
       <Radio.Group value={speakerMode} onChange={(event) => setSpeakerMode(event.target.value)} disabled={uploading}>
         <Radio.Button value="2">2</Radio.Button>
@@ -1150,7 +1318,7 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
         <Radio.Button value="auto">智能识别</Radio.Button>
       </Radio.Group>
       {speakerMode === 'auto' && <Text type="warning">该模式下识别时长会显著提升，请谨慎选择</Text>}
-    </div>
+    </div>}
     {progress > 0 && <Progress percent={progress} status={progress >= 100 ? 'success' : 'active'} />}
     {progress >= 100 && uploading && <Paragraph type="secondary">文件已上传，正在保存到云存储...</Paragraph>}
     {uploadError && <Text type="danger">{uploadError}</Text>}
@@ -1235,6 +1403,105 @@ function QueueModal({ open, projectId, clockNow, onClose, onRefresh }: { open: b
   ]} /></Modal>;
 }
 
+function MembersModal({ open, projectId, project, onClose, onRefresh }: { open: boolean; projectId: string; project: Project | null; onClose: () => void; onRefresh: () => void }) {
+  const [members, setMembers] = useState<User[]>([]);
+  const [username, setUsername] = useState('');
+  const [loading, setLoading] = useState(false);
+  const load = useCallback(async () => {
+    if (!open) return;
+    const data = await api<{ items: User[] }>(`/api/projects/${projectId}/members`);
+    setMembers(data.items);
+  }, [open, projectId]);
+  useEffect(() => { void load(); }, [load]);
+  const add = async () => {
+    if (!username.trim()) return;
+    await api(`/api/projects/${projectId}/members`, { method: 'POST', body: JSON.stringify({ username: username.trim() }) });
+    setUsername('');
+    message.success('成员已添加');
+    void load();
+  };
+  const remove = async (userId: string) => {
+    await api(`/api/projects/${projectId}/members/${userId}`, { method: 'DELETE' });
+    message.success('成员已移除');
+    void load();
+  };
+  const toggleSharing = async (shared: boolean, force = false) => {
+    setLoading(true);
+    try {
+      await api(`/api/projects/${projectId}/sharing`, { method: 'PATCH', body: JSON.stringify({ is_shared: shared, force }) });
+      message.success(shared ? '已开启项目共享' : '已关闭项目共享');
+      onRefresh();
+    } catch (err) {
+      const text = err instanceof Error ? err.message : '';
+      if (!shared && !force && text.includes('引用')) {
+        Modal.confirm({
+          title: '该项目文件已被引用',
+          content: '关闭共享后，其他项目中的引用文件将不可用。是否继续？',
+          okText: '继续关闭',
+          okButtonProps: { danger: true },
+          onOk: () => toggleSharing(false, true),
+        });
+      } else {
+        message.error(text || '操作失败');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+  return <Modal title="项目成员与共享" open={open} onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={760}>
+    <Space direction="vertical" style={{ width: '100%' }}>
+      <Card size="small" title="项目共享">
+        <Space>
+          <Tag color={project?.is_shared ? 'green' : 'default'}>{project?.is_shared ? '已共享' : '未共享'}</Tag>
+          <Button loading={loading} onClick={() => toggleSharing(!project?.is_shared)}>{project?.is_shared ? '关闭共享' : '开启共享'}</Button>
+          <Text type="secondary">开启后，其他用户可搜索该项目文件并添加引用。</Text>
+        </Space>
+      </Card>
+      <Card size="small" title="项目成员">
+        <Space.Compact style={{ width: '100%', marginBottom: 12 }}>
+          <Input placeholder="输入用户名添加成员" value={username} onChange={(e) => setUsername(e.target.value)} onPressEnter={add} />
+          <Button type="primary" onClick={add}>添加</Button>
+        </Space.Compact>
+        <Table rowKey="user_id" size="small" pagination={false} dataSource={members} columns={[
+          { title: '用户名', dataIndex: 'username' },
+          { title: '姓名', dataIndex: 'display_name' },
+          { title: '角色', dataIndex: 'role', render: (value: string) => value === 'admin' ? '管理员' : '用户' },
+          { title: '操作', width: 100, render: (_, row) => row.user_id === project?.owner_id ? <Tag>创建人</Tag> : <Button size="small" danger onClick={() => remove(row.user_id)}>移除</Button> }
+        ]} />
+      </Card>
+    </Space>
+  </Modal>;
+}
+
+function SharedFilesModal({ open, projectId, onClose, onAdded }: { open: boolean; projectId: string; onClose: () => void; onAdded: () => void }) {
+  const [keyword, setKeyword] = useState('');
+  const [items, setItems] = useState<Array<Recording & { project_title?: string }>>([]);
+  const load = useCallback(async () => {
+    if (!open) return;
+    const data = await api<{ items: Array<Recording & { project_title?: string }> }>(`/api/shared-files/search?target_project_id=${projectId}&keyword=${encodeURIComponent(keyword)}`);
+    setItems(data.items);
+  }, [open, projectId, keyword]);
+  useEffect(() => { void load(); }, [load]);
+  const addReference = async (fileId?: string) => {
+    if (!fileId) return;
+    await api(`/api/projects/${projectId}/file-references`, { method: 'POST', body: JSON.stringify({ source_file_id: fileId }) });
+    message.success('已添加引用文件');
+    onAdded();
+  };
+  return <Modal title="添加共享文件引用" open={open} onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={820}>
+    <Space direction="vertical" style={{ width: '100%' }}>
+      <Input.Search placeholder="搜索共享文件" allowClear onSearch={setKeyword} onChange={(e) => { if (!e.target.value) setKeyword(''); }} />
+      <Table rowKey="file_id" size="small" pagination={{ pageSize: 8 }} dataSource={items} columns={[
+        { title: '文件名', dataIndex: 'file_name' },
+        { title: '类型', dataIndex: 'file_type', width: 100, render: fileTypeLabel },
+        { title: '来源项目', dataIndex: 'project_title', width: 180 },
+        { title: '状态', dataIndex: 'status', width: 120, render: recordingStatusLabel },
+        { title: '操作', width: 100, render: (_, row) => <Button size="small" type="primary" onClick={() => addReference(row.file_id)}>添加引用</Button> },
+      ]} />
+    </Space>
+  </Modal>;
+}
+
 type AiNodeKey = 'asr' | 'clean' | 'summary' | 'qa';
 
 const AI_SETTING_NODES: Array<{ key: AiNodeKey; label: string; hint: string }> = [
@@ -1251,6 +1518,112 @@ type SettingsFormValues = {
   ai: Record<AiNodeKey, { model: string; url: string; key?: string }>;
   storage: AppSettings['storage'];
 };
+
+function AdminPage({ onBack }: { onBack: () => void }) {
+  const [users, setUsers] = useState<User[]>([]);
+  const [projectUsage, setProjectUsage] = useState<any[]>([]);
+  const [userUsage, setUserUsage] = useState<any[]>([]);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [quotaUser, setQuotaUser] = useState<User | null>(null);
+  const [form] = Form.useForm();
+  const [quotaForm] = Form.useForm<UserQuota>();
+  const load = useCallback(async () => {
+    const [userData, projectData, userUsageData, jobData] = await Promise.all([
+      api<{ items: User[] }>('/api/admin/users'),
+      api<{ items: any[] }>('/api/admin/usage/projects'),
+      api<{ items: any[] }>('/api/admin/usage/users'),
+      api<{ items: Job[] }>('/api/jobs/recent?page_size=50'),
+    ]);
+    setUsers(userData.items);
+    setProjectUsage(projectData.items);
+    setUserUsage(userUsageData.items);
+    setJobs(jobData.items);
+  }, []);
+  useEffect(() => { void load().catch((err) => message.error((err as Error).message)); }, [load]);
+  const createUser = async () => {
+    const values = await form.validateFields();
+    await api('/api/admin/users', { method: 'POST', body: JSON.stringify(values) });
+    message.success('用户已创建');
+    setCreateOpen(false);
+    form.resetFields();
+    void load();
+  };
+  const updateUser = async (user: User, patch: Partial<User>) => {
+    await api(`/api/admin/users/${user.user_id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+    message.success('用户已更新');
+    void load();
+  };
+  const openQuota = async (user: User) => {
+    const quota = await api<UserQuota>(`/api/admin/users/${user.user_id}/quota`);
+    setQuotaUser(user);
+    quotaForm.setFieldsValue(quota);
+  };
+  const saveQuota = async () => {
+    if (!quotaUser) return;
+    const values = await quotaForm.validateFields();
+    await api(`/api/admin/users/${quotaUser.user_id}/quota`, { method: 'PATCH', body: JSON.stringify(values) });
+    message.success('限额已保存');
+    setQuotaUser(null);
+    void load();
+  };
+  return <>
+    <Header className="topbar"><Space><Button onClick={onBack}>返回</Button><Title level={3}>管理后台</Title></Space></Header>
+    <Content className="home-content settings-content">
+      <Tabs items={[
+        { key: 'users', label: '用户管理', children: <Card extra={<Button type="primary" onClick={() => setCreateOpen(true)}>新建用户</Button>}>
+          <Table rowKey="user_id" dataSource={users} pagination={false} columns={[
+            { title: '用户名', dataIndex: 'username' },
+            { title: '姓名', dataIndex: 'display_name' },
+            { title: '角色', dataIndex: 'role', render: (value: string, row: User) => <Select size="small" value={value} style={{ width: 100 }} onChange={(role) => updateUser(row, { role: role as User['role'] })} options={[{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }]} /> },
+            { title: '状态', dataIndex: 'status', render: (value: string, row: User) => <Select size="small" value={value} style={{ width: 100 }} onChange={(status) => updateUser(row, { status: status as User['status'] })} options={[{ value: 'active', label: '启用' }, { value: 'disabled', label: '停用' }]} /> },
+            { title: '操作', render: (_, row) => <Space><Button size="small" onClick={() => openQuota(row)}>限额</Button><Button size="small" onClick={() => Modal.confirm({ title: '重置密码', content: <Input.Password id="reset-password-input" placeholder="输入新密码" />, onOk: async () => { const input = document.getElementById('reset-password-input') as HTMLInputElement | null; await api(`/api/admin/users/${row.user_id}/reset-password`, { method: 'POST', body: JSON.stringify({ password: input?.value || '' }) }); message.success('密码已重置'); } })}>重置密码</Button></Space> }
+          ]} />
+        </Card> },
+        { key: 'projectUsage', label: '项目用量报表', children: <Card><Table rowKey="project_id" dataSource={projectUsage} pagination={{ pageSize: 10 }} columns={[
+          { title: '项目', dataIndex: 'project_name' },
+          { title: '文件数', dataIndex: 'file_count' },
+          { title: '录音总时长', dataIndex: 'audio_duration_seconds', render: formatDuration },
+          { title: '问答次数', dataIndex: 'qa_count' },
+          { title: '输入 Token', dataIndex: 'qa_input_tokens' },
+          { title: '输出 Token', dataIndex: 'qa_output_tokens' },
+        ]} /></Card> },
+        { key: 'userUsage', label: '用户用量报表', children: <Card><Table rowKey="user_id" dataSource={userUsage} pagination={{ pageSize: 10 }} columns={[
+          { title: '用户', dataIndex: 'display_name' },
+          { title: '录音处理量', dataIndex: 'audio_duration_seconds', render: formatDuration },
+          { title: 'ASR次数', dataIndex: 'asr_count' },
+          { title: '问答次数', dataIndex: 'qa_count' },
+          { title: '输入 Token', dataIndex: 'qa_input_tokens' },
+          { title: '输出 Token', dataIndex: 'qa_output_tokens' },
+        ]} /></Card> },
+        { key: 'jobs', label: '任务监控', children: <Card><Table rowKey="job_id" dataSource={jobs} pagination={{ pageSize: 10 }} columns={[
+          { title: '任务', dataIndex: 'job_type', render: jobTypeLabel },
+          { title: '状态', dataIndex: 'status', render: jobStatusLabel },
+          { title: '项目', dataIndex: 'project_id' },
+          { title: '文件', dataIndex: 'file_id' },
+          { title: '错误', dataIndex: 'error_message' },
+        ]} /></Card> },
+      ]} />
+      <Modal title="新建用户" open={createOpen} onOk={createUser} onCancel={() => setCreateOpen(false)} okText="创建" cancelText="取消">
+        <Form form={form} layout="vertical" initialValues={{ role: 'user', status: 'active' }}>
+          <Form.Item name="username" label="用户名" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="display_name" label="姓名"><Input /></Form.Item>
+          <Form.Item name="password" label="初始密码" rules={[{ required: true }]}><Input.Password /></Form.Item>
+          <Form.Item name="role" label="角色"><Select options={[{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }]} /></Form.Item>
+          <Form.Item name="status" label="状态"><Select options={[{ value: 'active', label: '启用' }, { value: 'disabled', label: '停用' }]} /></Form.Item>
+        </Form>
+      </Modal>
+      <Modal title={`设置限额：${quotaUser?.display_name || ''}`} open={!!quotaUser} onOk={saveQuota} onCancel={() => setQuotaUser(null)} okText="保存" cancelText="取消">
+        <Form form={quotaForm} layout="vertical">
+          <Form.Item name="daily_asr_seconds" label="每日 ASR 时长上限（秒，0 表示不限）"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="monthly_asr_seconds" label="每月 ASR 时长上限（秒，0 表示不限）"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="daily_qa_tokens" label="每日问答 Token 上限（0 表示不限）"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="monthly_qa_tokens" label="每月问答 Token 上限（0 表示不限）"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
+        </Form>
+      </Modal>
+    </Content>
+  </>;
+}
 
 function SettingsPage({ onBack }: { onBack: () => void }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);

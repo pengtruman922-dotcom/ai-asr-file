@@ -2102,3 +2102,86 @@ ASR 诊断事件包括：`download_url_created`、`submit_start`、`submit_compl
 ```
 
 前端用该字段在录音列表展示失败阶段和内联重试按钮；重试仍调用 `POST /api/jobs/{job_id}/retry`。
+
+---
+
+## 2026-05-12 V1.0 API 补充：多用户、统一文件、共享引用、用量报表
+
+### Auth / Me
+
+- `POST /api/auth/login`
+  - 请求：`{ "username": "admin", "password": "mp2026" }`
+  - 返回：`{ "token": "...", "user": { "user_id": "...", "username": "admin", "role": "admin" } }`
+- `GET /api/auth/me`
+  - 返回当前登录用户。
+- `GET /api/me/usage`
+  - 返回当前用户今日/月度 ASR 秒数、问答 Token 用量和限额。
+
+### Admin Users
+
+- `GET /api/admin/users`
+- `POST /api/admin/users`
+  - 请求：`{ "username": "zhangsan", "display_name": "张三", "password": "初始密码", "role": "user", "status": "active" }`
+- `PATCH /api/admin/users/{user_id}`
+  - 支持更新：`display_name`、`role`、`status`。
+- `POST /api/admin/users/{user_id}/reset-password`
+  - 请求：`{ "password": "新密码" }`
+- `GET /api/admin/users/{user_id}/quota`
+- `PATCH /api/admin/users/{user_id}/quota`
+  - 字段：`daily_asr_seconds`、`monthly_asr_seconds`、`daily_qa_tokens`、`monthly_qa_tokens`；`0` 表示不限。
+
+### Project Members / Sharing
+
+- `GET /api/projects/{project_id}/members`
+- `POST /api/projects/{project_id}/members`
+  - 请求：`{ "username": "zhangsan" }` 或 `{ "user_id": "user_xxx" }`
+- `DELETE /api/projects/{project_id}/members/{user_id}`
+- `PATCH /api/projects/{project_id}/sharing`
+  - 请求：`{ "is_shared": true }`
+  - 关闭共享且存在引用时返回 `PROJECT_HAS_REFERENCES`，二次确认后传 `{ "is_shared": false, "force": true }`。
+- `GET /api/projects/{project_id}/references/check`
+  - 返回该项目文件被引用数量和引用关系。
+
+### Unified Files
+
+- `POST /api/projects/{project_id}/files/upload-session`
+  - 支持扩展名：`mp3/wav/m4a/aac/flac/ogg/wma/pdf/xlsx/xlsm/xls/docx/txt/md/markdown`。
+  - 音频请求可带：`duration_seconds`、`speaker_count`。
+  - 返回：`file_id`、可选 `recording_id`、`file_type`、预签名上传信息。
+- `POST /api/files/{file_id}/upload-content`
+  - 表单：`file`；音频可加 `speaker_count`。
+  - 音频入 ASR → 清洁稿 → 纪要任务链；非音频入 `extract_text` 任务。
+- `GET /api/projects/{project_id}/files`
+  - 返回项目自有文件和引用文件。核心字段：`file_id`、`recording_id`、`file_type`、`source`、`reference_status`、`status`、`extracted_char_count`、失败任务字段。
+- `GET /api/files/{file_id}`
+- `GET /api/files/{file_id}/extracted-text`
+  - 返回 `extracted_text`、`extraction_engine`、`extraction_warnings`。
+- `PATCH /api/files/{file_id}`
+  - 当前支持修改 `file_name`。
+- `POST /api/files/{file_id}/reprocess`
+  - 音频重新进入 ASR；非音频重新进入文字提取。
+- `DELETE /api/files/{file_id}`
+  - 存在引用时返回 `FILE_HAS_REFERENCES`，二次确认后加 `?force=true`。
+
+### Shared File References
+
+- `GET /api/shared-files/search?target_project_id={project_id}&keyword={keyword}`
+  - 搜索已开启共享项目中的文件。
+- `POST /api/projects/{project_id}/file-references`
+  - 请求：`{ "source_file_id": "file_xxx" }`
+- `DELETE /api/projects/{project_id}/file-references/{reference_id}`
+
+### QA V1.0
+
+- `POST /api/qa-threads/{thread_id}/messages/stream`
+  - 新请求字段：`file_ids`。
+  - 兼容旧字段：`recording_ids`。
+  - 音频文件加载清洁稿；非音频文件加载 `extracted_text`。
+  - 超过上下文上限返回 `LLM_CONTEXT_TOO_LONG`；用户需减少勾选文件。
+
+### Admin Usage Reports
+
+- `GET /api/admin/usage/projects`
+  - 返回项目文件数、录音总时长、问答次数、输入/输出 Token。
+- `GET /api/admin/usage/users`
+  - 返回用户录音处理量、ASR 次数、问答次数、输入/输出 Token。

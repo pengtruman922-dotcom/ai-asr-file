@@ -584,8 +584,25 @@ class LLMClient:
         )
 
     def _qa_prompt(self, question: str, materials: list[dict], history: list[dict] | None = None) -> tuple[str, str]:
-        prompt_materials = [{"file_name": item.get("file_name", ""), "segments": item.get("segments", [])} for item in materials]
-        system = "请回答用户问题。优先参考给定文件内容和最近对话上下文；不要编造文件中没有的事实；引用文件内容时注明来源文件名和时间点；如果资料不足，请直接说明。不要输出内部ID。"
+        prompt_materials = []
+        for item in materials:
+            if item.get("segments"):
+                prompt_materials.append(
+                    {
+                        "file_name": item.get("file_name", ""),
+                        "file_type": item.get("file_type", "audio"),
+                        "segments": item.get("segments", []),
+                    }
+                )
+            else:
+                prompt_materials.append(
+                    {
+                        "file_name": item.get("file_name", ""),
+                        "file_type": item.get("file_type", "document"),
+                        "extracted_text": item.get("text", ""),
+                    }
+                )
+        system = "请回答用户问题。优先参考给定文件内容和最近对话上下文；没有相关材料时也可以基于通用知识回答，但要说明材料中未找到依据；不要编造文件中没有的事实；引用文件内容时尽量注明来源文件名、页码/Sheet/时间点；不要输出内部ID。"
         prompt = json.dumps(
             {
                 "question": question,

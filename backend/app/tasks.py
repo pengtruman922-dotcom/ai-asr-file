@@ -6,10 +6,12 @@ from sqlalchemy import delete
 from .clients import asr_client, llm_client
 from .config import get_settings
 from .database import session_scope
+from .extractors import extract_content
 from .settings_service import get_ai_config
 from .models import (
     CleanTranscriptSegment,
     ProcessingJob,
+    ProjectFile,
     QAMessage,
     QASession,
     QAThread,
@@ -39,6 +41,8 @@ def create_job(session, project_id: str | None, recording_id: str | None, job_ty
         id=new_id("job"),
         project_id=project_id,
         recording_id=recording_id,
+        file_id=(metadata or {}).get("file_id"),
+        user_id=(metadata or {}).get("user_id"),
         job_type=job_type,
         status="queued",
         metadata_json=metadata or {},
@@ -59,12 +63,24 @@ def run_job(job_id: str) -> None:
         job.started_at = datetime.now(timezone.utc)
         job.progress = 10
         recording = session.get(Recording, job.recording_id) if job.recording_id else None
+        project_file = session.get(ProjectFile, job.file_id) if job.file_id else None
         if recording and job.job_type == "asr_transcription":
             recording.status = "asr_processing"
+            if project_file:
+                project_file.status = "asr_processing"
         elif recording and job.job_type == "clean_transcript":
             recording.status = "cleaning"
+            if project_file:
+                project_file.status = "cleaning"
         elif recording and job.job_type == "summary_generation":
             recording.status = "summary_generating"
+            if project_file:
+                project_file.status = "summary_generating"
+        elif job.job_type == "extract_text" and job.file_id:
+            project_file = session.get(ProjectFile, job.file_id)
+            if project_file:
+                project_file.status = "extracting"
+                project_file.extraction_status = "running"
         elif job.job_type == "qa_answer":
             message_id = (job.metadata_json or {}).get("assistant_message_id")
             if message_id:
@@ -81,6 +97,8 @@ def run_job(job_id: str) -> None:
             _run_summary(job_id)
         elif job_type == "qa_answer":
             _run_qa(job_id)
+        elif job_type == "extract_text":
+            _run_extract_text(job_id)
         elif job_type == "export":
             _mark_succeeded(job_id)
         else:
@@ -98,6 +116,11 @@ def run_job(job_id: str) -> None:
                     recording = session.get(Recording, job.recording_id)
                     if recording:
                         recording.status = "failed"
+                if job.file_id:
+                    project_file = session.get(ProjectFile, job.file_id)
+                    if project_file:
+                        project_file.status = "failed"
+                        project_file.extraction_status = "failed" if job_type == "extract_text" else project_file.extraction_status
             message_id = (job.metadata_json or {}).get("assistant_message_id") if job else None
             if message_id:
                 message = session.get(QAMessage, message_id)
@@ -112,6 +135,8 @@ def retry_failed_job(job_id: str) -> str:
         if not old or old.status != "failed":
             raise ValueError("JOB_NOT_RETRYABLE")
         new = create_job(session, old.project_id, old.recording_id, old.job_type, old.metadata_json)
+        new.file_id = old.file_id
+        new.user_id = old.user_id
         new_id_value = new.id
         if old.recording_id:
             recording = session.get(Recording, old.recording_id)
@@ -122,6 +147,18 @@ def retry_failed_job(job_id: str) -> str:
                     recording.status = "asr_completed"
                 elif old.job_type == "summary_generation":
                     recording.status = "cleaning_completed"
+        if old.file_id:
+            project_file = session.get(ProjectFile, old.file_id)
+            if project_file:
+                if old.job_type == "extract_text":
+                    project_file.status = "queued"
+                    project_file.extraction_status = "queued"
+                elif old.job_type == "asr_transcription":
+                    project_file.status = "queued"
+                elif old.job_type == "clean_transcript":
+                    project_file.status = "asr_completed"
+                elif old.job_type == "summary_generation":
+                    project_file.status = "cleaning_completed"
     enqueue_job(new_id_value)
     return new_id_value
 
@@ -205,6 +242,10 @@ def _run_asr(job_id: str) -> None:
             )
         recording.status = "asr_completed"
         recording.duration_seconds = max([item["end_time_ms"] for item in segments] or [0]) // 1000
+        project_file = session.query(ProjectFile).filter_by(recording_id=recording.id).first()
+        if project_file:
+            project_file.status = "asr_completed"
+            project_file.duration_seconds = recording.duration_seconds
         job.status = "succeeded"
         job.progress = 100
         job.finished_at = datetime.now(timezone.utc)
@@ -213,6 +254,8 @@ def _run_asr(job_id: str) -> None:
                 id=new_id("use"),
                 project_id=recording.project_id,
                 recording_id=recording.id,
+                file_id=project_file.id if project_file else job.file_id,
+                user_id=job.user_id,
                 job_id=job.id,
                 call_type="asr",
                 model_provider="aliyun/mock",
@@ -221,7 +264,7 @@ def _run_asr(job_id: str) -> None:
                 status="succeeded",
             )
         )
-        next_job = create_job(session, recording.project_id, recording.id, "clean_transcript")
+        next_job = create_job(session, recording.project_id, recording.id, "clean_transcript", {"file_id": project_file.id if project_file else job.file_id, "user_id": job.user_id})
         next_id = next_job.id
     enqueue_job(next_id)
 
@@ -293,6 +336,9 @@ def _run_clean(job_id: str) -> None:
                 )
             )
         recording.status = "cleaning_completed"
+        project_file = session.query(ProjectFile).filter_by(recording_id=recording.id).first()
+        if project_file:
+            project_file.status = "cleaning_completed"
         job.status = "succeeded"
         job.progress = 100
         job.finished_at = datetime.now(timezone.utc)
@@ -301,6 +347,8 @@ def _run_clean(job_id: str) -> None:
                 id=new_id("use"),
                 project_id=recording.project_id,
                 recording_id=recording.id,
+                file_id=project_file.id if project_file else job.file_id,
+                user_id=job.user_id,
                 job_id=job.id,
                 call_type="clean",
                 model_provider="aliyun/mock",
@@ -310,7 +358,7 @@ def _run_clean(job_id: str) -> None:
                 status="succeeded",
             )
         )
-        next_job = create_job(session, recording.project_id, recording.id, "summary_generation")
+        next_job = create_job(session, recording.project_id, recording.id, "summary_generation", {"file_id": project_file.id if project_file else job.file_id, "user_id": job.user_id})
         next_id = next_job.id
     enqueue_job(next_id)
 
@@ -338,6 +386,9 @@ def _run_summary(job_id: str) -> None:
         existing.content = content
         recording.status = "completed"
         recording.summary_stale = False
+        project_file = session.query(ProjectFile).filter_by(recording_id=recording.id).first()
+        if project_file:
+            project_file.status = "completed"
         job.status = "succeeded"
         job.progress = 100
         job.finished_at = datetime.now(timezone.utc)
@@ -346,12 +397,63 @@ def _run_summary(job_id: str) -> None:
                 id=new_id("use"),
                 project_id=recording.project_id,
                 recording_id=recording.id,
+                file_id=project_file.id if project_file else job.file_id,
+                user_id=job.user_id,
                 job_id=job.id,
                 call_type="summary",
                 model_provider="aliyun/mock",
                 model_name=get_ai_config("summary").get("model", get_settings().llm_summary_model),
                 input_tokens=sum(len(x["text"]) for x in segments),
                 output_tokens=len(str(content)),
+                status="succeeded",
+            )
+        )
+
+
+def _run_extract_text(job_id: str) -> None:
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        project_file = session.get(ProjectFile, job.file_id)
+        if not project_file:
+            raise RuntimeError("FILE_NOT_FOUND: 文件不存在")
+        object_key = project_file.object_key
+        file_config = storage.file_config(project_file)
+        file_name = project_file.file_name
+        extension = project_file.extension
+        project_id = project_file.project_id
+        created_by_id = project_file.created_by_id or job.user_id
+        project_file.status = "extracting"
+        project_file.extraction_status = "running"
+        job.progress = 20
+    content = storage.read_bytes(object_key, file_config)
+    result = extract_content(file_name, extension, content)
+    extracted_text = result.get("text", "") or ""
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        project_file = session.get(ProjectFile, job.file_id)
+        if not project_file:
+            raise RuntimeError("FILE_NOT_FOUND: 文件不存在")
+        project_file.extracted_text = extracted_text
+        project_file.extracted_char_count = len(extracted_text)
+        project_file.extraction_engine = result.get("engine", "")
+        project_file.extraction_warnings = result.get("warnings", [])
+        project_file.extraction_status = "succeeded"
+        project_file.status = "completed"
+        job.status = "succeeded"
+        job.progress = 100
+        job.finished_at = datetime.now(timezone.utc)
+        session.add(
+            UsageRecord(
+                id=new_id("use"),
+                project_id=project_id,
+                file_id=project_file.id,
+                user_id=created_by_id,
+                job_id=job.id,
+                call_type="extract",
+                model_provider="local",
+                model_name=project_file.extraction_engine or "local-extractor",
+                input_tokens=project_file.file_size_bytes or 0,
+                output_tokens=project_file.extracted_char_count,
                 status="succeeded",
             )
         )
@@ -364,6 +466,7 @@ def _run_qa(job_id: str) -> None:
         thread = session.get(QAThread, meta.get("thread_id"))
         user_message = session.get(QAMessage, meta.get("user_message_id"))
         assistant_message = session.get(QAMessage, meta.get("assistant_message_id"))
+        selected_file_ids = assistant_message.selected_file_ids or []
         selected_ids = assistant_message.selected_recording_ids or []
         recordings = session.query(Recording).filter(Recording.id.in_(selected_ids)).all()
         materials = []
@@ -375,6 +478,9 @@ def _run_qa(job_id: str) -> None:
             ]
             total_chars += sum(len(seg["text"]) for seg in segments)
             materials.append({"recording_id": rec.id, "file_name": rec.file_name, "segments": segments})
+        for project_file in session.query(ProjectFile).filter(ProjectFile.id.in_(selected_file_ids), ProjectFile.file_type != "audio").all():
+            total_chars += len(project_file.extracted_text or "")
+            materials.append({"file_id": project_file.id, "file_name": project_file.file_name, "file_type": project_file.file_type, "text": project_file.extracted_text or ""})
         if total_chars > 100000:
             raise RuntimeError("LLM_CONTEXT_TOO_LONG")
         previous_messages = (
@@ -410,6 +516,7 @@ def _run_qa(job_id: str) -> None:
             UsageRecord(
                 id=new_id("use"),
                 project_id=thread.project_id,
+                user_id=job.user_id,
                 job_id=job.id,
                 call_type="qa",
                 model_provider="aliyun/mock",
@@ -435,5 +542,6 @@ def _error_code_for(job_type: str) -> str:
         "clean_transcript": "LLM_CLEAN_FAILED",
         "summary_generation": "LLM_SUMMARY_FAILED",
         "qa_answer": "LLM_CALL_FAILED",
+        "extract_text": "TEXT_EXTRACTION_FAILED",
         "export": "EXPORT_FAILED",
     }.get(job_type, "INTERNAL_ERROR")

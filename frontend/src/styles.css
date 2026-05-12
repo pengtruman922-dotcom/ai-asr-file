@@ -112,14 +112,14 @@ body { background: #f5f6f8; color: #1d2433; font-family: -apple-system, BlinkMac
 /* ── Status dot ── */
 .status-dot-label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #6b7a99; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-.status-completed .status-dot { background: #22c55e; }
-.status-completed { color: #15803d; }
+.status-completed .status-dot, .status-extracted .status-dot { background: #22c55e; }
+.status-completed, .status-extracted { color: #15803d; }
 .status-processing .status-dot, .status-transcribing .status-dot, .status-cleaning .status-dot, .status-summarizing .status-dot,
 .status-uploading .status-dot, .status-asr_processing .status-dot, .status-asr_completed .status-dot,
-.status-cleaning_completed .status-dot, .status-summary_generating .status-dot { background: #f59e0b; }
+.status-cleaning_completed .status-dot, .status-summary_generating .status-dot, .status-extracting .status-dot { background: #f59e0b; }
 .status-processing, .status-transcribing, .status-cleaning, .status-summarizing,
 .status-uploading, .status-asr_processing, .status-asr_completed,
-.status-cleaning_completed, .status-summary_generating { color: #b45309; }
+.status-cleaning_completed, .status-summary_generating, .status-extracting { color: #b45309; }
 .status-failed .status-dot { background: #ef4444; }
 .status-failed { color: #b91c1c; }
 .status-pending .status-dot, .status-queued .status-dot, .status-created .status-dot { background: #94a3b8; }
@@ -173,6 +173,13 @@ body { background: #f5f6f8; color: #1d2433; font-family: -apple-system, BlinkMac
 .qa-reasoning { margin: 8px 0; color: #5f6b7a; }
 .qa-reasoning summary { cursor: pointer; font-size: 12px; }
 .qa-reasoning pre { margin-top: 6px; max-height: 180px; overflow: auto; background: #eef4ff; color: #334155; padding: 10px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; }
+
+.usage-dropdown-card { width: 300px; background: #fff; border: 1px solid #e8ecf2; border-radius: 14px; padding: 14px; box-shadow: 0 12px 40px rgba(16,24,40,0.14); display: grid; gap: 10px; }
+.usage-progress-row { display: grid; gap: 4px; }
+.usage-progress-label { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
+.extracted-text-panel { min-height: 100%; }
+.extracted-text-panel pre { margin: 0; background: #fbfcff; color: #243044; border: 1px solid #e8ecf2; line-height: 1.7; font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace; }
+.empty-doc-text { min-height: 240px; display: flex; align-items: center; justify-content: center; color: #8492a6; background: #fbfcff; border: 1px dashed #dce2ed; border-radius: 12px; }
 
 /* ── Markdown ── */
 .markdown-body h3, .markdown-body h4, .markdown-body h5 { margin: 14px 0 8px; }

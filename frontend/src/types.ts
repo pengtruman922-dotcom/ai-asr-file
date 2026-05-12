@@ -3,15 +3,30 @@ export type Project = {
   title: string;
   description?: string;
   recording_count: number;
+  file_count?: number;
   total_duration_seconds: number;
+  owner_id?: string;
+  owner_name?: string;
+  is_shared?: boolean;
+  access_role?: 'admin' | 'owner' | 'member' | 'shared' | '';
   updated_at: string;
 };
 
 export type Recording = {
+  file_id?: string;
   recording_id: string;
   project_id: string;
+  source_project_id?: string;
+  reference_id?: string | null;
+  reference_status?: string;
+  source?: 'own' | 'reference';
   file_name: string;
+  file_type?: 'audio' | 'pdf' | 'excel' | 'docx' | 'text' | 'markdown';
   status: string;
+  extraction_status?: string;
+  extracted_char_count?: number;
+  extraction_engine?: string;
+  extraction_warnings?: string[];
   duration_seconds: number;
   file_size_bytes: number;
   template_type: string;
@@ -82,9 +97,33 @@ export type QAMessage = {
   content: string;
   reasoning_content?: string;
   selected_recording_ids: string[];
+  selected_file_ids?: string[];
   sources: Array<{ file_name: string; start_time_ms: number; quote: string }>;
   status: string;
   created_at: string;
+};
+
+export type User = {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: 'admin' | 'user';
+  status: 'active' | 'disabled';
+  quota?: UserQuota;
+};
+
+export type UserQuota = {
+  daily_asr_seconds: number;
+  monthly_asr_seconds: number;
+  daily_qa_tokens: number;
+  monthly_qa_tokens: number;
+};
+
+export type MeUsage = {
+  user: User;
+  quota: UserQuota;
+  today: { asr_seconds: number; qa_tokens: number };
+  month: { asr_seconds: number; qa_tokens: number };
 };
 
 export type AiNodeSettings = {

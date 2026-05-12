@@ -63,6 +63,15 @@ class StorageService:
             "path_prefix": recording.storage_path_prefix or "",
         }
 
+    def file_config(self, project_file) -> dict:
+        return {
+            "provider": project_file.storage_provider or "local",
+            "bucket_name": project_file.storage_bucket_name or "",
+            "endpoint": project_file.storage_endpoint or "",
+            "region": project_file.storage_region or "auto",
+            "path_prefix": project_file.storage_path_prefix or "",
+        }
+
     def create_upload_url(self, object_key: str, content_type: str, storage_config: dict | None = None):
         full_key = self._full_key(object_key, storage_config)
         if self._is_local(storage_config):
@@ -136,6 +145,16 @@ class StorageService:
             Body=content.encode("utf-8"),
             ContentType="text/markdown; charset=utf-8",
         )
+
+    def read_bytes(self, object_key: str, storage_config: dict | None = None) -> bytes:
+        full_key = self._full_key(object_key, storage_config)
+        if self._is_local(storage_config):
+            return self._local_path(full_key).read_bytes()
+        config = self._effective_config(storage_config)
+        self._validate_remote_config(config)
+        client = self._s3_client(config)
+        response = client.get_object(Bucket=config["bucket_name"], Key=full_key)
+        return response["Body"].read()
 
     def delete_prefix(self, prefix: str, storage_config: dict | None = None):
         full_prefix = self._full_key(prefix, storage_config)
