@@ -19,6 +19,8 @@ const MIDDLE_PANEL_MIN = 480;
 const RESIZE_HANDLE_TOTAL_WIDTH = 16;
 const SECONDS_PER_HOUR = 3600;
 const TOKENS_PER_KTOKEN = 1000;
+const AUDIO_UPLOAD_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'wma'];
+const DOCUMENT_UPLOAD_EXTENSIONS = ['pdf', 'xlsx', 'xlsm', 'xls', 'docx', 'txt', 'md', 'markdown'];
 
 type ProjectColumnWidths = typeof PROJECT_LAYOUT_DEFAULT;
 type ResizeDivider = 'left' | 'right';
@@ -125,6 +127,10 @@ function formValuesToQuota(values: QuotaFormValues): UserQuota {
     daily_qa_tokens: kToTokens(values.daily_qa_ktokens),
     monthly_qa_tokens: kToTokens(values.monthly_qa_ktokens),
   };
+}
+
+function fileExtension(fileName?: string) {
+  return (fileName || '').split('.').pop()?.toLowerCase() || '';
 }
 
 const JOB_TYPE_LABELS: Record<string, string> = {
@@ -650,7 +656,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const [qaQuestion, setQaQuestion] = useState('');
   const [qaSubmitting, setQaSubmitting] = useState(false);
   const [qaStreaming, setQaStreaming] = useState(false);
-  const [uploadOpen, setUploadOpen] = useState(false);
+  const [audioUploadOpen, setAudioUploadOpen] = useState(false);
+  const [documentUploadOpen, setDocumentUploadOpen] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
   const [sharedOpen, setSharedOpen] = useState(false);
@@ -1060,6 +1067,16 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
       if (key === 'delete') deleteProject();
     }
   };
+  const uploadMenu: MenuProps = {
+    items: [
+      { key: 'audio', label: '上传录音文件', icon: <UploadOutlined /> },
+      { key: 'document', label: '上传资料文件', icon: <InboxOutlined /> },
+    ],
+    onClick: ({ key }) => {
+      if (key === 'audio') setAudioUploadOpen(true);
+      if (key === 'document') setDocumentUploadOpen(true);
+    },
+  };
 
   return (
     <div className="project-shell">
@@ -1074,7 +1091,14 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
       </div>
       <div ref={workspaceRef} className={`workspace-grid ${activeResize ? 'resizing' : ''}`} style={workspaceStyle}>
         <aside className="left-panel panel-scroll">
-          <Space className="panel-actions"><Button type="primary" icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>上传文件</Button><Button onClick={() => setQueueOpen(true)}>处理队列</Button><Button onClick={() => setMembersOpen(true)}>成员</Button><Button onClick={() => setSharedOpen(true)}>共享文件</Button></Space>
+          <Space className="panel-actions">
+            <Dropdown menu={uploadMenu} trigger={['hover', 'click']} placement="bottomLeft">
+              <Button type="primary" icon={<UploadOutlined />}>上传 <DownOutlined /></Button>
+            </Dropdown>
+            <Button onClick={() => setQueueOpen(true)}>处理队列</Button>
+            <Button onClick={() => setMembersOpen(true)}>成员</Button>
+            <Button onClick={() => setSharedOpen(true)}>共享文件</Button>
+          </Space>
           <Text type="secondary">文件数量 {recordings.length}/30</Text>
           {recordings.length >= 30 && <Tag color="orange">已达到建议上限</Tag>}
           <List dataSource={recordings} locale={{ emptyText: '暂无文件' }} renderItem={(rec) => (
@@ -1126,7 +1150,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
           ]} />
         </aside>
       </div>
-      <UploadModal open={uploadOpen} projectId={projectId} onClose={() => setUploadOpen(false)} onCreated={(id) => { setSelectedId(id); void loadProject(); }} onDone={() => { setUploadOpen(false); void loadProject(); }} />
+      <AudioUploadModal open={audioUploadOpen} projectId={projectId} onClose={() => setAudioUploadOpen(false)} onCreated={(id) => { setSelectedId(id); void loadProject(); }} onDone={() => { setAudioUploadOpen(false); void loadProject(); }} />
+      <DocumentUploadModal open={documentUploadOpen} projectId={projectId} onClose={() => setDocumentUploadOpen(false)} onCreated={(id) => { setSelectedId(id); void loadProject(); }} onDone={() => { setDocumentUploadOpen(false); void loadProject(); }} />
       <QueueModal open={queueOpen} projectId={projectId} clockNow={clockNow} onClose={() => setQueueOpen(false)} onRefresh={() => { void loadProject(); void loadSelected(); }} />
       <MembersModal open={membersOpen} projectId={projectId} project={project} onClose={() => setMembersOpen(false)} onRefresh={() => { void loadProject(); }} />
       <SharedFilesModal open={sharedOpen} projectId={projectId} onClose={() => setSharedOpen(false)} onAdded={() => { void loadProject(); }} />
@@ -1327,7 +1352,23 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
   </Space>;
 }
 
-function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: boolean; projectId: string; onClose: () => void; onCreated: (fileId: string) => void; onDone: () => void }) {
+type UploadModalProps = {
+  open: boolean;
+  projectId: string;
+  onClose: () => void;
+  onCreated: (fileId: string) => void;
+  onDone: () => void;
+};
+
+type DocumentUploadState = {
+  uid: string;
+  name: string;
+  progress: number;
+  status: 'waiting' | 'uploading' | 'queued' | 'failed';
+  error?: string;
+};
+
+function AudioUploadModal({ open, projectId, onClose, onCreated, onDone }: UploadModalProps) {
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
@@ -1342,21 +1383,26 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
 
   const upload = async () => {
     const file = files[0]?.originFileObj as File | undefined;
-    if (!file) return message.warning('请选择文件');
+    if (!file) return message.warning('请选择录音文件');
+    const ext = fileExtension(file.name);
+    if (!AUDIO_UPLOAD_EXTENSIONS.includes(ext)) return message.error('请选择 mp3、wav、m4a、aac、flac、ogg、wma 格式的录音文件');
     if (file.size > limits.max_upload_size_mb * 1024 * 1024) return message.error(`文件超过 ${limits.max_upload_size_mb}MB`);
     setUploading(true);
     setUploadError('');
     try {
-      const ext = file.name.split('.').pop()?.toLowerCase() || '';
-      const audio = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'wma'].includes(ext);
-      const duration = audio ? await readAudioDuration(file) : null;
-      if (audio && duration && duration > limits.max_recording_duration_hours * 3600) {
+      const duration = await readAudioDuration(file);
+      if (duration !== null && duration < 60) {
+        Modal.warning({ title: '音频时长不足', content: '音频短于1分钟，无法上传。请上传至少1分钟的录音文件。' });
+        setUploadError('音频短于1分钟，无法上传');
+        return;
+      }
+      if (duration && duration > limits.max_recording_duration_hours * 3600) {
         message.error(`文件时长超过 ${limits.max_recording_duration_hours} 小时`);
         return;
       }
       const speakerCount = speakerMode === 'auto' ? 'auto' : speakerMode;
       setProgress(0);
-      const session = await api<any>(`/api/projects/${projectId}/files/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: audio && duration ? Math.round(duration) : 0, template_type: 'customer_interview', speaker_count: speakerCount }) });
+      const session = await api<any>(`/api/projects/${projectId}/files/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: duration ? Math.round(duration) : 0, template_type: 'customer_interview', speaker_count: speakerCount }) });
       onCreated(session.file_id);
       const form = new FormData();
       form.append('file', file);
@@ -1374,7 +1420,7 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
           closeAfterClientUpload();
         }
       });
-      message.success('上传完成，已进入处理队列');
+      message.success('录音已上传，已进入识别队列');
       setFiles([]);
       setProgress(0);
       setSpeakerMode('2');
@@ -1387,15 +1433,20 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
       setUploading(false);
     }
   };
-  const selectedExt = (files[0]?.name || '').split('.').pop()?.toLowerCase() || '';
-  const selectedIsAudio = !selectedExt || ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'wma'].includes(selectedExt);
-  return <Modal title="上传文件" open={open} onCancel={uploading ? undefined : onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}>
-    <Upload.Dragger beforeUpload={() => false} maxCount={1} fileList={files} onChange={(info) => { setFiles(info.fileList); setUploadError(''); }} disabled={uploading}>
+  return <Modal title="上传录音文件" open={open} onCancel={uploading ? undefined : onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}>
+    <Upload.Dragger
+      beforeUpload={() => false}
+      accept={AUDIO_UPLOAD_EXTENSIONS.map((item) => `.${item}`).join(',')}
+      maxCount={1}
+      fileList={files}
+      onChange={(info) => { setFiles(info.fileList.slice(-1)); setUploadError(''); }}
+      disabled={uploading}
+    >
       <p className="ant-upload-drag-icon"><InboxOutlined /></p>
-      <p>拖拽文件到此处，或点击选择文件</p>
-      <p>支持音频、PDF、Excel、Word docx、TXT/MD，单文件最大 {limits.max_upload_size_mb}MB；音频时长上限 {limits.max_recording_duration_hours} 小时</p>
+      <p>拖拽录音到此处，或点击选择文件</p>
+      <p>支持 mp3、wav、m4a、aac、flac、ogg、wma；单文件最大 {limits.max_upload_size_mb}MB；音频时长 1 分钟至 {limits.max_recording_duration_hours} 小时</p>
     </Upload.Dragger>
-    {selectedIsAudio && <div className="upload-speaker-setting">
+    <div className="upload-speaker-setting">
       <Text strong>说话人数量</Text>
       <Radio.Group value={speakerMode} onChange={(event) => setSpeakerMode(event.target.value)} disabled={uploading}>
         <Radio.Button value="2">2</Radio.Button>
@@ -1404,9 +1455,106 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
         <Radio.Button value="auto">智能识别</Radio.Button>
       </Radio.Group>
       {speakerMode === 'auto' && <Text type="warning">该模式下识别时长会显著提升，请谨慎选择</Text>}
-    </div>}
+    </div>
     {progress > 0 && <Progress percent={progress} status={progress >= 100 ? 'success' : 'active'} />}
     {progress >= 100 && uploading && <Paragraph type="secondary">文件已上传，正在保存到云存储...</Paragraph>}
+    {uploadError && <Text type="danger">{uploadError}</Text>}
+  </Modal>;
+}
+
+function DocumentUploadModal({ open, projectId, onClose, onCreated, onDone }: UploadModalProps) {
+  const [files, setFiles] = useState<UploadFile[]>([]);
+  const [items, setItems] = useState<DocumentUploadState[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+  const [limits, setLimits] = useState<AppSettings['basic']>({ max_upload_size_mb: 500, max_recording_duration_hours: 3 });
+
+  useEffect(() => {
+    if (!open) return;
+    api<AppSettings>('/api/settings').then((data) => setLimits(data.basic)).catch(() => undefined);
+  }, [open]);
+
+  const reset = () => {
+    setFiles([]);
+    setItems([]);
+    setUploadError('');
+  };
+
+  const updateItem = (uid: string, patch: Partial<DocumentUploadState>) => {
+    setItems((prev) => prev.map((item) => item.uid === uid ? { ...item, ...patch } : item));
+  };
+
+  const upload = async () => {
+    const selectedFiles = files.map((item) => item.originFileObj as File | undefined).filter((item): item is File => Boolean(item));
+    if (!selectedFiles.length) return message.warning('请选择资料文件');
+    if (selectedFiles.length > 10) return message.error('一次最多上传10个资料文件');
+    const invalid = selectedFiles.find((file) => !DOCUMENT_UPLOAD_EXTENSIONS.includes(fileExtension(file.name)));
+    if (invalid) return message.error(`文件格式不支持：${invalid.name}`);
+    const tooLarge = selectedFiles.find((file) => file.size > limits.max_upload_size_mb * 1024 * 1024);
+    if (tooLarge) return message.error(`${tooLarge.name} 超过 ${limits.max_upload_size_mb}MB`);
+
+    setUploading(true);
+    setUploadError('');
+    setItems(selectedFiles.map((file, index) => ({ uid: files[index].uid, name: file.name, progress: 0, status: 'waiting' })));
+    let firstFileId = '';
+    try {
+      for (let index = 0; index < selectedFiles.length; index += 1) {
+        const file = selectedFiles[index];
+        const uid = files[index].uid;
+        const ext = fileExtension(file.name);
+        updateItem(uid, { status: 'uploading', progress: 0 });
+        const session = await api<any>(`/api/projects/${projectId}/files/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: 0 }) });
+        if (!firstFileId) firstFileId = session.file_id;
+        const form = new FormData();
+        form.append('file', file);
+        await postFormWithProgress(`/api/files/${session.file_id}/upload-content`, form, (value) => updateItem(uid, { progress: value }));
+        updateItem(uid, { status: 'queued', progress: 100 });
+      }
+      if (firstFileId) onCreated(firstFileId);
+      message.success(`已上传 ${selectedFiles.length} 个资料文件，已进入处理队列`);
+      reset();
+      onDone();
+    } catch (err) {
+      const text = err instanceof Error ? err.message : '上传失败';
+      setUploadError(text);
+      message.error(text);
+      setItems((prev) => prev.map((item) => item.status === 'uploading' ? { ...item, status: 'failed', error: text } : item));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return <Modal title="上传资料文件" open={open} onCancel={uploading ? undefined : () => { reset(); onClose(); }} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading} width={720}>
+    <Upload.Dragger
+      multiple
+      beforeUpload={() => false}
+      accept={DOCUMENT_UPLOAD_EXTENSIONS.map((item) => `.${item}`).join(',')}
+      maxCount={10}
+      fileList={files}
+      onChange={(info) => { setFiles(info.fileList.slice(0, 10)); setUploadError(''); }}
+      disabled={uploading}
+    >
+      <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+      <p>拖拽资料文件到此处，或点击选择文件</p>
+      <p>支持 PDF、Excel、Word docx、TXT/MD；一次最多 10 个，单文件最大 {limits.max_upload_size_mb}MB</p>
+    </Upload.Dragger>
+    {items.length > 0 && <List
+      className="document-upload-list"
+      size="small"
+      dataSource={items}
+      renderItem={(item) => <List.Item>
+        <Space direction="vertical" style={{ width: '100%' }} size={2}>
+          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+            <Text>{item.name}</Text>
+            <Tag color={item.status === 'failed' ? 'red' : item.status === 'queued' ? 'green' : item.status === 'uploading' ? 'blue' : 'default'}>
+              {item.status === 'waiting' ? '等待上传' : item.status === 'uploading' ? '上传中' : item.status === 'queued' ? '已进入处理队列' : '上传失败'}
+            </Tag>
+          </Space>
+          <Progress percent={item.progress} size="small" status={item.status === 'failed' ? 'exception' : item.progress >= 100 ? 'success' : 'active'} />
+          {item.error && <Text type="danger">{item.error}</Text>}
+        </Space>
+      </List.Item>}
+    />}
     {uploadError && <Text type="danger">{uploadError}</Text>}
   </Modal>;
 }

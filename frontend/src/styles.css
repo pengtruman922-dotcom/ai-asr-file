@@ -497,6 +497,7 @@ body { background: #f5f6f8; color: #1d2433; font-family: -apple-system, BlinkMac
 .upload-speaker-setting { margin-top: 14px; display: grid; gap: 8px; }
 .upload-speaker-setting .ant-radio-group { display: flex; flex-wrap: wrap; gap: 6px; }
 .upload-speaker-setting .ant-radio-button-wrapper { border-radius: 8px; border-inline-start-width: 1px; }
+.document-upload-list { margin-top: 14px; max-height: 260px; overflow-y: auto; border: 1px solid #eef2f7; border-radius: 10px; padding: 4px 10px; background: #fbfcff; }
 
 /* ── QA ── */
 .qa-card { width: 100%; background: #fbfcff; }
