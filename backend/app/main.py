@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import requests
-from sqlalchemy import func, or_
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .clients import llm_client
@@ -30,7 +30,6 @@ from .models import (
     RawTranscriptSegment,
     Recording,
     SummaryArtifact,
-    SystemSetting,
     User,
     UserQuota,
     UsageRecord,
@@ -49,8 +48,6 @@ DOCUMENT_EXTENSIONS = {"pdf", "xlsx", "xlsm", "xls", "docx", "txt", "md", "markd
 ALLOWED_EXTENSIONS = AUDIO_EXTENSIONS | DOCUMENT_EXTENSIONS
 FIXED_SPEAKER_COUNTS = {2, 3, 4}
 CONTEXT_CHAR_LIMIT = 100000
-DEFAULT_USER_QUOTA_SETTING_KEY = "default_user_quota"
-QUOTA_FIELDS = ["daily_asr_seconds", "monthly_asr_seconds", "daily_qa_tokens", "monthly_qa_tokens"]
 
 
 def asr_speaker_metadata(value) -> dict:
@@ -151,38 +148,6 @@ def quota_payload(quota: UserQuota | None):
         "daily_qa_tokens": quota.daily_qa_tokens if quota else 0,
         "monthly_qa_tokens": quota.monthly_qa_tokens if quota else 0,
     }
-
-
-def normalize_quota_payload(payload: dict | None) -> dict[str, int]:
-    payload = payload or {}
-    normalized: dict[str, int] = {}
-    for field in QUOTA_FIELDS:
-        try:
-            normalized[field] = max(0, int(payload.get(field) or 0))
-        except (TypeError, ValueError):
-            normalized[field] = 0
-    return normalized
-
-
-def default_quota_payload(db: Session) -> dict[str, int]:
-    row = db.get(SystemSetting, DEFAULT_USER_QUOTA_SETTING_KEY)
-    value = row.value if row and isinstance(row.value, dict) else {}
-    return normalize_quota_payload(value)
-
-
-def ensure_user_quota(db: Session, user_id: str, defaults: dict[str, int] | None = None) -> UserQuota:
-    quota = db.get(UserQuota, user_id)
-    if quota:
-        return quota
-    values = defaults if defaults is not None else default_quota_payload(db)
-    quota = UserQuota(user_id=user_id, **normalize_quota_payload(values))
-    db.add(quota)
-    return quota
-
-
-def apply_quota_values(quota: UserQuota, values: dict[str, int]) -> None:
-    for field, value in normalize_quota_payload(values).items():
-        setattr(quota, field, value)
 
 
 def build_user_usage_payload(db: Session, user: User):
@@ -449,69 +414,11 @@ def my_usage(request: Request, db: Session = Depends(get_db)):
     return ok(build_user_usage_payload(db, user))
 
 
-@app.get("/api/users/search")
-def search_users(
-    request: Request,
-    keyword: str = "",
-    project_id: str = "",
-    limit: int = 20,
-    db: Session = Depends(get_db),
-):
-    user = current_user(request, db)
-    keyword = keyword.strip()
-    limit = max(1, min(limit, 50))
-    query = db.query(User).filter(User.status == "active")
-    if keyword:
-        pattern = f"%{keyword}%"
-        query = query.filter(or_(User.username.ilike(pattern), User.display_name.ilike(pattern)))
-    elif project_id:
-        return ok({"items": []})
-    if project_id:
-        project = db.get(Project, project_id)
-        if not project:
-            return fail("PROJECT_NOT_FOUND", "项目不存在", status_code=404)
-        ensure_project_owner_or_admin(project, user)
-        member_user_ids = [row.user_id for row in db.query(ProjectMember.user_id).filter_by(project_id=project_id).all()]
-        if member_user_ids:
-            query = query.filter(~User.id.in_(member_user_ids))
-    rows = query.order_by(User.username.asc()).limit(limit).all()
-    return ok({"items": [user_payload(row, db) for row in rows]})
-
-
 @app.get("/api/admin/users")
-def admin_list_users(request: Request, include_deleted: bool = False, db: Session = Depends(get_db)):
+def admin_list_users(request: Request, db: Session = Depends(get_db)):
     require_admin_user(request, db)
-    query = db.query(User)
-    if not include_deleted:
-        query = query.filter(User.status != "deleted")
-    rows = query.order_by(User.created_at.desc()).all()
+    rows = db.query(User).order_by(User.created_at.desc()).all()
     return ok({"items": [user_payload(row, db) | {"quota": quota_payload(db.get(UserQuota, row.id))} for row in rows]})
-
-
-@app.get("/api/admin/default-quota")
-def admin_get_default_quota(request: Request, db: Session = Depends(get_db)):
-    require_admin_user(request, db)
-    return ok(default_quota_payload(db))
-
-
-@app.patch("/api/admin/default-quota")
-async def admin_patch_default_quota(payload: dict, request: Request, db: Session = Depends(get_db)):
-    require_admin_user(request, db)
-    values = normalize_quota_payload(payload)
-    row = db.get(SystemSetting, DEFAULT_USER_QUOTA_SETTING_KEY)
-    if not row:
-        row = SystemSetting(key=DEFAULT_USER_QUOTA_SETTING_KEY, value=values)
-        db.add(row)
-    else:
-        row.value = values
-    updated_count = 0
-    users = db.query(User).filter(User.status != "deleted").all()
-    for user in users:
-        quota = ensure_user_quota(db, user.id, values)
-        apply_quota_values(quota, values)
-        updated_count += 1
-    db.commit()
-    return ok(values | {"updated_user_count": updated_count})
 
 
 @app.post("/api/admin/users")
@@ -520,10 +427,9 @@ async def admin_create_user(payload: dict, request: Request, db: Session = Depen
     username = str(payload.get("username") or "").strip()
     password = str(payload.get("password") or "").strip()
     if not username or not password:
-        return fail("VALIDATION_ERROR", "用户ID和初始密码不能为空")
+        return fail("VALIDATION_ERROR", "用户名和初始密码不能为空")
     if db.query(User).filter_by(username=username).first():
-        return fail("USER_EXISTS", "用户ID已存在")
-    default_quota = default_quota_payload(db)
+        return fail("USER_EXISTS", "用户名已存在")
     user = User(
         id=new_id("user"),
         username=username,
@@ -534,14 +440,14 @@ async def admin_create_user(payload: dict, request: Request, db: Session = Depen
     )
     db.add(user)
     db.flush()
-    db.add(UserQuota(user_id=user.id, **default_quota))
+    db.add(UserQuota(user_id=user.id))
     db.commit()
     return ok(user_payload(user, db))
 
 
 @app.patch("/api/admin/users/{user_id}")
 async def admin_update_user(user_id: str, payload: dict, request: Request, db: Session = Depends(get_db)):
-    admin = require_admin_user(request, db)
+    require_admin_user(request, db)
     user = db.get(User, user_id)
     if not user:
         return fail("USER_NOT_FOUND", "用户不存在", status_code=404)
@@ -549,45 +455,10 @@ async def admin_update_user(user_id: str, payload: dict, request: Request, db: S
         user.display_name = str(payload.get("display_name") or "").strip() or user.username
     if payload.get("role") in {"admin", "user"}:
         user.role = payload["role"]
-    if payload.get("status") in {"active", "disabled", "deleted"}:
-        if user.id == admin.id and payload["status"] in {"disabled", "deleted"}:
-            return fail("VALIDATION_ERROR", "不能停用或删除当前登录管理员")
+    if payload.get("status") in {"active", "disabled"}:
         user.status = payload["status"]
     db.commit()
     return ok(user_payload(user, db))
-
-
-@app.delete("/api/admin/users/{user_id}")
-def admin_delete_user(user_id: str, request: Request, db: Session = Depends(get_db)):
-    admin = require_admin_user(request, db)
-    user = db.get(User, user_id)
-    if not user:
-        return fail("USER_NOT_FOUND", "用户不存在", status_code=404)
-    if user.id == admin.id:
-        return fail("VALIDATION_ERROR", "不能删除当前登录管理员")
-    user.status = "deleted"
-    db.commit()
-    return ok({"deleted": True, "user": user_payload(user, db)})
-
-
-@app.post("/api/admin/users/batch-delete")
-async def admin_batch_delete_users(payload: dict, request: Request, db: Session = Depends(get_db)):
-    admin = require_admin_user(request, db)
-    raw_ids = payload.get("user_ids") if isinstance(payload, dict) else []
-    if not isinstance(raw_ids, list):
-        return fail("VALIDATION_ERROR", "请选择要删除的用户")
-    user_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
-    deleted_count = 0
-    skipped_user_ids: list[str] = []
-    for user_id in user_ids:
-        user = db.get(User, user_id)
-        if not user or user.id == admin.id or user.status == "deleted":
-            skipped_user_ids.append(user_id)
-            continue
-        user.status = "deleted"
-        deleted_count += 1
-    db.commit()
-    return ok({"deleted_count": deleted_count, "skipped_user_ids": skipped_user_ids})
 
 
 @app.post("/api/admin/users/{user_id}/reset-password")
@@ -610,8 +481,7 @@ def admin_get_quota(user_id: str, request: Request, db: Session = Depends(get_db
     user = db.get(User, user_id)
     if not user:
         return fail("USER_NOT_FOUND", "用户不存在", status_code=404)
-    quota = ensure_user_quota(db, user_id)
-    db.commit()
+    quota = db.get(UserQuota, user_id)
     return ok(quota_payload(quota))
 
 
@@ -623,8 +493,11 @@ async def admin_patch_quota(user_id: str, payload: dict, request: Request, db: S
         return fail("USER_NOT_FOUND", "用户不存在", status_code=404)
     quota = db.get(UserQuota, user_id)
     if not quota:
-        quota = ensure_user_quota(db, user_id)
-    apply_quota_values(quota, payload)
+        quota = UserQuota(user_id=user_id)
+        db.add(quota)
+    for field in ["daily_asr_seconds", "monthly_asr_seconds", "daily_qa_tokens", "monthly_qa_tokens"]:
+        if field in payload:
+            setattr(quota, field, max(0, int(payload.get(field) or 0)))
     db.commit()
     return ok(quota_payload(quota))
 
@@ -754,8 +627,6 @@ async def add_project_member(project_id: str, payload: dict, request: Request, d
     target = db.get(User, target_user_id) if target_user_id else db.query(User).filter_by(username=target_username).first()
     if not target:
         return fail("USER_NOT_FOUND", "用户不存在", status_code=404)
-    if target.status != "active":
-        return fail("USER_DISABLED", "只能添加启用状态的用户", status_code=400)
     if not db.query(ProjectMember).filter_by(project_id=project.id, user_id=target.id).first():
         db.add(ProjectMember(id=new_id("pm"), project_id=project.id, user_id=target.id))
         db.commit()
@@ -838,29 +709,6 @@ async def create_file_upload_session(project_id: str, payload: dict, request: Re
     recording_id = new_id("rec") if file_type == "audio" else None
     storage_config = resolve_storage_config(db)
     object_key = f"projects/{project_id}/files/{file_id}/original.{extension}"
-    if file_type == "audio":
-        recording = Recording(
-            id=recording_id,
-            project_id=project.id,
-            file_name=payload.get("file_name") or f"{file_id}.{extension}",
-            object_key=object_key,
-            storage_config_id="default",
-            storage_provider=storage_config.get("provider", "railway_bucket"),
-            storage_bucket_name=storage_config.get("bucket_name", ""),
-            storage_endpoint=storage_config.get("endpoint", ""),
-            storage_region=storage_config.get("region", "auto"),
-            storage_path_prefix=storage_config.get("path_prefix", ""),
-            mime_type=payload.get("mime_type") or "application/octet-stream",
-            extension=extension,
-            file_size_bytes=size,
-            duration_seconds=duration_seconds,
-            status="uploading",
-            template_type=payload.get("template_type") or "customer_interview",
-        )
-        db.add(recording)
-        # PostgreSQL enforces the project_files.recording_id foreign key immediately.
-        # Flush the recording first so the unified file row can safely reference it.
-        db.flush()
     project_file = ProjectFile(
         id=file_id,
         project_id=project.id,
@@ -883,6 +731,26 @@ async def create_file_upload_session(project_id: str, payload: dict, request: Re
         extraction_status="" if file_type == "audio" else "pending",
     )
     db.add(project_file)
+    if file_type == "audio":
+        recording = Recording(
+            id=recording_id,
+            project_id=project.id,
+            file_name=project_file.file_name,
+            object_key=object_key,
+            storage_config_id="default",
+            storage_provider=project_file.storage_provider,
+            storage_bucket_name=project_file.storage_bucket_name,
+            storage_endpoint=project_file.storage_endpoint,
+            storage_region=project_file.storage_region,
+            storage_path_prefix=project_file.storage_path_prefix,
+            mime_type=project_file.mime_type,
+            extension=extension,
+            file_size_bytes=size,
+            duration_seconds=duration_seconds,
+            status="uploading",
+            template_type=payload.get("template_type") or "customer_interview",
+        )
+        db.add(recording)
     try:
         upload = storage.create_upload_url(object_key, project_file.mime_type, storage_config)
     except RuntimeError as exc:

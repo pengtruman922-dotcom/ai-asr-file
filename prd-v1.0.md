@@ -1,4 +1,4 @@
-﻿# AI ASR File V1.0 PRD
+# AI ASR File V1.0 PRD
 
 版本：V1.0  
 更新日期：2026-05-12  
