@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
+import type { CSSProperties, Key, PointerEvent as ReactPointerEvent } from 'react';
 import { Button, Card, Checkbox, Dropdown, Form, Input, InputNumber, Layout, List, Modal, Progress, Radio, Select, Space, Table, Tabs, Tag, Typography, Upload, message } from 'antd';
 import { DeleteOutlined, DownloadOutlined, DownOutlined, EditOutlined, InboxOutlined, MoreOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
 import type { MenuProps, UploadFile } from 'antd';
@@ -17,11 +17,21 @@ const RIGHT_PANEL_MIN = 300;
 const RIGHT_PANEL_MAX = 930;
 const MIDDLE_PANEL_MIN = 480;
 const RESIZE_HANDLE_TOTAL_WIDTH = 16;
+const SECONDS_PER_HOUR = 3600;
+const TOKENS_PER_KTOKEN = 1000;
+const AUDIO_UPLOAD_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'wma'];
+const DOCUMENT_UPLOAD_EXTENSIONS = ['pdf', 'xlsx', 'xlsm', 'xls', 'docx', 'txt', 'md', 'markdown'];
 
 type ProjectColumnWidths = typeof PROJECT_LAYOUT_DEFAULT;
 type ResizeDivider = 'left' | 'right';
 type SegmentSaveOptions = { replaceSameSpeaker?: boolean };
 type SegmentUpdateResult = { summary_stale?: boolean; updated_count?: number };
+type QuotaFormValues = {
+  daily_asr_hours: number;
+  monthly_asr_hours: number;
+  daily_qa_ktokens: number;
+  monthly_qa_ktokens: number;
+};
 type RecordingStatus =
   | 'created'
   | 'uploading'
@@ -76,6 +86,52 @@ const PROCESSING_RECORDING_STATUSES = new Set<RecordingStatus>([
   'summary_generating',
   'extracting',
 ]);
+
+function secondsToHours(seconds?: number) {
+  return Number(((seconds || 0) / SECONDS_PER_HOUR).toFixed(2));
+}
+
+function hoursToSeconds(hours?: number) {
+  return Math.round((hours || 0) * SECONDS_PER_HOUR);
+}
+
+function tokensToK(tokens?: number) {
+  return Number(((tokens || 0) / TOKENS_PER_KTOKEN).toFixed(2));
+}
+
+function kToTokens(ktokens?: number) {
+  return Math.round((ktokens || 0) * TOKENS_PER_KTOKEN);
+}
+
+function formatHoursFromSeconds(seconds?: number) {
+  return `${secondsToHours(seconds).toFixed(2)} 小时`;
+}
+
+function formatKTokens(tokens?: number) {
+  return `${tokensToK(tokens).toFixed(2)} KToken`;
+}
+
+function quotaToFormValues(quota?: UserQuota | null): QuotaFormValues {
+  return {
+    daily_asr_hours: secondsToHours(quota?.daily_asr_seconds),
+    monthly_asr_hours: secondsToHours(quota?.monthly_asr_seconds),
+    daily_qa_ktokens: tokensToK(quota?.daily_qa_tokens),
+    monthly_qa_ktokens: tokensToK(quota?.monthly_qa_tokens),
+  };
+}
+
+function formValuesToQuota(values: QuotaFormValues): UserQuota {
+  return {
+    daily_asr_seconds: hoursToSeconds(values.daily_asr_hours),
+    monthly_asr_seconds: hoursToSeconds(values.monthly_asr_hours),
+    daily_qa_tokens: kToTokens(values.daily_qa_ktokens),
+    monthly_qa_tokens: kToTokens(values.monthly_qa_ktokens),
+  };
+}
+
+function fileExtension(fileName?: string) {
+  return (fileName || '').split('.').pop()?.toLowerCase() || '';
+}
 
 const JOB_TYPE_LABELS: Record<string, string> = {
   asr_transcription: 'ASR 转写',
@@ -358,11 +414,11 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
             <h2 className="login-form-title">洞见</h2>
             <p className="login-form-subtitle">MP&nbsp;Insight</p>
             <span className="login-form-rule" />
-            <p className="login-form-hint">欢迎回来，请使用管理员分配的账号登录。<br />内测期间默认账号：<em>admin</em> / <em>mp2026</em></p>
+            <p className="login-form-hint">欢迎回来，请使用管理员分配的用户ID登录。<br />内测期间默认用户ID：<em>admin</em> / <em>mp2026</em></p>
           </div>
           <Form className="login-form" layout="vertical" initialValues={{ username: 'admin', password: 'mp2026' }} onFinish={onFinish}>
-            <Form.Item name="username" label="账号" rules={[{ required: true, message: '请输入账号' }]}>
-              <Input size="large" variant="borderless" className="login-input" placeholder="请输入账号" />
+            <Form.Item name="username" label="用户ID" rules={[{ required: true, message: '请输入用户ID' }]}>
+              <Input size="large" variant="borderless" className="login-input" placeholder="请输入用户ID" />
             </Form.Item>
             <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>
               <Input.Password size="large" variant="borderless" className="login-input" placeholder="请输入密码" />
@@ -560,10 +616,10 @@ function UserUsageDropdown({ me, usage, onAdmin, onLogout }: { me: User | null; 
   const card = <div className="usage-dropdown-card">
     <Text strong>{me?.display_name || me?.username || '当前用户'}</Text>
     <Text type="secondary">{me?.role === 'admin' ? '管理员' : '普通用户'}</Text>
-    <UsageProgress label="今日 ASR" value={usage?.today.asr_seconds || 0} limit={dailyAsrLimit} formatter={formatDuration} />
-    <UsageProgress label="本月 ASR" value={usage?.month.asr_seconds || 0} limit={monthlyAsrLimit} formatter={formatDuration} />
-    <UsageProgress label="今日问答 Token" value={usage?.today.qa_tokens || 0} limit={dailyQaLimit} />
-    <UsageProgress label="本月问答 Token" value={usage?.month.qa_tokens || 0} limit={monthlyQaLimit} />
+    <UsageProgress label="今日 ASR" value={usage?.today.asr_seconds || 0} limit={dailyAsrLimit} formatter={formatHoursFromSeconds} />
+    <UsageProgress label="本月 ASR" value={usage?.month.asr_seconds || 0} limit={monthlyAsrLimit} formatter={formatHoursFromSeconds} />
+    <UsageProgress label="今日问答" value={usage?.today.qa_tokens || 0} limit={dailyQaLimit} formatter={formatKTokens} />
+    <UsageProgress label="本月问答" value={usage?.month.qa_tokens || 0} limit={monthlyQaLimit} formatter={formatKTokens} />
     <Space direction="vertical" style={{ width: '100%' }}>
       {me?.role === 'admin' && <Button block onClick={onAdmin}>管理后台</Button>}
       <Button block onClick={onLogout}>退出</Button>
@@ -600,7 +656,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const [qaQuestion, setQaQuestion] = useState('');
   const [qaSubmitting, setQaSubmitting] = useState(false);
   const [qaStreaming, setQaStreaming] = useState(false);
-  const [uploadOpen, setUploadOpen] = useState(false);
+  const [audioUploadOpen, setAudioUploadOpen] = useState(false);
+  const [documentUploadOpen, setDocumentUploadOpen] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
   const [sharedOpen, setSharedOpen] = useState(false);
@@ -1010,6 +1067,16 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
       if (key === 'delete') deleteProject();
     }
   };
+  const uploadMenu: MenuProps = {
+    items: [
+      { key: 'audio', label: '上传录音文件', icon: <UploadOutlined /> },
+      { key: 'document', label: '上传资料文件', icon: <InboxOutlined /> },
+    ],
+    onClick: ({ key }) => {
+      if (key === 'audio') setAudioUploadOpen(true);
+      if (key === 'document') setDocumentUploadOpen(true);
+    },
+  };
 
   return (
     <div className="project-shell">
@@ -1024,7 +1091,14 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
       </div>
       <div ref={workspaceRef} className={`workspace-grid ${activeResize ? 'resizing' : ''}`} style={workspaceStyle}>
         <aside className="left-panel panel-scroll">
-          <Space className="panel-actions"><Button type="primary" icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>上传文件</Button><Button onClick={() => setQueueOpen(true)}>处理队列</Button><Button onClick={() => setMembersOpen(true)}>成员</Button><Button onClick={() => setSharedOpen(true)}>共享文件</Button></Space>
+          <Space className="panel-actions">
+            <Dropdown menu={uploadMenu} trigger={['hover', 'click']} placement="bottomLeft">
+              <Button type="primary" icon={<UploadOutlined />}>上传 <DownOutlined /></Button>
+            </Dropdown>
+            <Button onClick={() => setQueueOpen(true)}>处理队列</Button>
+            <Button onClick={() => setMembersOpen(true)}>成员</Button>
+            <Button onClick={() => setSharedOpen(true)}>共享文件</Button>
+          </Space>
           <Text type="secondary">文件数量 {recordings.length}/30</Text>
           {recordings.length >= 30 && <Tag color="orange">已达到建议上限</Tag>}
           <List dataSource={recordings} locale={{ emptyText: '暂无文件' }} renderItem={(rec) => (
@@ -1076,7 +1150,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
           ]} />
         </aside>
       </div>
-      <UploadModal open={uploadOpen} projectId={projectId} onClose={() => setUploadOpen(false)} onCreated={(id) => { setSelectedId(id); void loadProject(); }} onDone={() => { setUploadOpen(false); void loadProject(); }} />
+      <AudioUploadModal open={audioUploadOpen} projectId={projectId} onClose={() => setAudioUploadOpen(false)} onCreated={(id) => { setSelectedId(id); void loadProject(); }} onDone={() => { setAudioUploadOpen(false); void loadProject(); }} />
+      <DocumentUploadModal open={documentUploadOpen} projectId={projectId} onClose={() => setDocumentUploadOpen(false)} onCreated={(id) => { setSelectedId(id); void loadProject(); }} onDone={() => { setDocumentUploadOpen(false); void loadProject(); }} />
       <QueueModal open={queueOpen} projectId={projectId} clockNow={clockNow} onClose={() => setQueueOpen(false)} onRefresh={() => { void loadProject(); void loadSelected(); }} />
       <MembersModal open={membersOpen} projectId={projectId} project={project} onClose={() => setMembersOpen(false)} onRefresh={() => { void loadProject(); }} />
       <SharedFilesModal open={sharedOpen} projectId={projectId} onClose={() => setSharedOpen(false)} onAdded={() => { void loadProject(); }} />
@@ -1277,7 +1352,23 @@ function QAView({ checked, recordings, threads, currentThreadId, setCurrentThrea
   </Space>;
 }
 
-function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: boolean; projectId: string; onClose: () => void; onCreated: (fileId: string) => void; onDone: () => void }) {
+type UploadModalProps = {
+  open: boolean;
+  projectId: string;
+  onClose: () => void;
+  onCreated: (fileId: string) => void;
+  onDone: () => void;
+};
+
+type DocumentUploadState = {
+  uid: string;
+  name: string;
+  progress: number;
+  status: 'waiting' | 'uploading' | 'queued' | 'failed';
+  error?: string;
+};
+
+function AudioUploadModal({ open, projectId, onClose, onCreated, onDone }: UploadModalProps) {
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
@@ -1292,21 +1383,26 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
 
   const upload = async () => {
     const file = files[0]?.originFileObj as File | undefined;
-    if (!file) return message.warning('请选择文件');
+    if (!file) return message.warning('请选择录音文件');
+    const ext = fileExtension(file.name);
+    if (!AUDIO_UPLOAD_EXTENSIONS.includes(ext)) return message.error('请选择 mp3、wav、m4a、aac、flac、ogg、wma 格式的录音文件');
     if (file.size > limits.max_upload_size_mb * 1024 * 1024) return message.error(`文件超过 ${limits.max_upload_size_mb}MB`);
     setUploading(true);
     setUploadError('');
     try {
-      const ext = file.name.split('.').pop()?.toLowerCase() || '';
-      const audio = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'wma'].includes(ext);
-      const duration = audio ? await readAudioDuration(file) : null;
-      if (audio && duration && duration > limits.max_recording_duration_hours * 3600) {
+      const duration = await readAudioDuration(file);
+      if (duration !== null && duration < 60) {
+        Modal.warning({ title: '音频时长不足', content: '音频短于1分钟，无法上传。请上传至少1分钟的录音文件。' });
+        setUploadError('音频短于1分钟，无法上传');
+        return;
+      }
+      if (duration && duration > limits.max_recording_duration_hours * 3600) {
         message.error(`文件时长超过 ${limits.max_recording_duration_hours} 小时`);
         return;
       }
       const speakerCount = speakerMode === 'auto' ? 'auto' : speakerMode;
       setProgress(0);
-      const session = await api<any>(`/api/projects/${projectId}/files/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: audio && duration ? Math.round(duration) : 0, template_type: 'customer_interview', speaker_count: speakerCount }) });
+      const session = await api<any>(`/api/projects/${projectId}/files/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: duration ? Math.round(duration) : 0, template_type: 'customer_interview', speaker_count: speakerCount }) });
       onCreated(session.file_id);
       const form = new FormData();
       form.append('file', file);
@@ -1324,7 +1420,7 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
           closeAfterClientUpload();
         }
       });
-      message.success('上传完成，已进入处理队列');
+      message.success('录音已上传，已进入识别队列');
       setFiles([]);
       setProgress(0);
       setSpeakerMode('2');
@@ -1337,15 +1433,20 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
       setUploading(false);
     }
   };
-  const selectedExt = (files[0]?.name || '').split('.').pop()?.toLowerCase() || '';
-  const selectedIsAudio = !selectedExt || ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'wma'].includes(selectedExt);
-  return <Modal title="上传文件" open={open} onCancel={uploading ? undefined : onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}>
-    <Upload.Dragger beforeUpload={() => false} maxCount={1} fileList={files} onChange={(info) => { setFiles(info.fileList); setUploadError(''); }} disabled={uploading}>
+  return <Modal title="上传录音文件" open={open} onCancel={uploading ? undefined : onClose} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading}>
+    <Upload.Dragger
+      beforeUpload={() => false}
+      accept={AUDIO_UPLOAD_EXTENSIONS.map((item) => `.${item}`).join(',')}
+      maxCount={1}
+      fileList={files}
+      onChange={(info) => { setFiles(info.fileList.slice(-1)); setUploadError(''); }}
+      disabled={uploading}
+    >
       <p className="ant-upload-drag-icon"><InboxOutlined /></p>
-      <p>拖拽文件到此处，或点击选择文件</p>
-      <p>支持音频、PDF、Excel、Word docx、TXT/MD，单文件最大 {limits.max_upload_size_mb}MB；音频时长上限 {limits.max_recording_duration_hours} 小时</p>
+      <p>拖拽录音到此处，或点击选择文件</p>
+      <p>支持 mp3、wav、m4a、aac、flac、ogg、wma；单文件最大 {limits.max_upload_size_mb}MB；音频时长 1 分钟至 {limits.max_recording_duration_hours} 小时</p>
     </Upload.Dragger>
-    {selectedIsAudio && <div className="upload-speaker-setting">
+    <div className="upload-speaker-setting">
       <Text strong>说话人数量</Text>
       <Radio.Group value={speakerMode} onChange={(event) => setSpeakerMode(event.target.value)} disabled={uploading}>
         <Radio.Button value="2">2</Radio.Button>
@@ -1354,9 +1455,106 @@ function UploadModal({ open, projectId, onClose, onCreated, onDone }: { open: bo
         <Radio.Button value="auto">智能识别</Radio.Button>
       </Radio.Group>
       {speakerMode === 'auto' && <Text type="warning">该模式下识别时长会显著提升，请谨慎选择</Text>}
-    </div>}
+    </div>
     {progress > 0 && <Progress percent={progress} status={progress >= 100 ? 'success' : 'active'} />}
     {progress >= 100 && uploading && <Paragraph type="secondary">文件已上传，正在保存到云存储...</Paragraph>}
+    {uploadError && <Text type="danger">{uploadError}</Text>}
+  </Modal>;
+}
+
+function DocumentUploadModal({ open, projectId, onClose, onCreated, onDone }: UploadModalProps) {
+  const [files, setFiles] = useState<UploadFile[]>([]);
+  const [items, setItems] = useState<DocumentUploadState[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+  const [limits, setLimits] = useState<AppSettings['basic']>({ max_upload_size_mb: 500, max_recording_duration_hours: 3 });
+
+  useEffect(() => {
+    if (!open) return;
+    api<AppSettings>('/api/settings').then((data) => setLimits(data.basic)).catch(() => undefined);
+  }, [open]);
+
+  const reset = () => {
+    setFiles([]);
+    setItems([]);
+    setUploadError('');
+  };
+
+  const updateItem = (uid: string, patch: Partial<DocumentUploadState>) => {
+    setItems((prev) => prev.map((item) => item.uid === uid ? { ...item, ...patch } : item));
+  };
+
+  const upload = async () => {
+    const selectedFiles = files.map((item) => item.originFileObj as File | undefined).filter((item): item is File => Boolean(item));
+    if (!selectedFiles.length) return message.warning('请选择资料文件');
+    if (selectedFiles.length > 10) return message.error('一次最多上传10个资料文件');
+    const invalid = selectedFiles.find((file) => !DOCUMENT_UPLOAD_EXTENSIONS.includes(fileExtension(file.name)));
+    if (invalid) return message.error(`文件格式不支持：${invalid.name}`);
+    const tooLarge = selectedFiles.find((file) => file.size > limits.max_upload_size_mb * 1024 * 1024);
+    if (tooLarge) return message.error(`${tooLarge.name} 超过 ${limits.max_upload_size_mb}MB`);
+
+    setUploading(true);
+    setUploadError('');
+    setItems(selectedFiles.map((file, index) => ({ uid: files[index].uid, name: file.name, progress: 0, status: 'waiting' })));
+    let firstFileId = '';
+    try {
+      for (let index = 0; index < selectedFiles.length; index += 1) {
+        const file = selectedFiles[index];
+        const uid = files[index].uid;
+        const ext = fileExtension(file.name);
+        updateItem(uid, { status: 'uploading', progress: 0 });
+        const session = await api<any>(`/api/projects/${projectId}/files/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: 0 }) });
+        if (!firstFileId) firstFileId = session.file_id;
+        const form = new FormData();
+        form.append('file', file);
+        await postFormWithProgress(`/api/files/${session.file_id}/upload-content`, form, (value) => updateItem(uid, { progress: value }));
+        updateItem(uid, { status: 'queued', progress: 100 });
+      }
+      if (firstFileId) onCreated(firstFileId);
+      message.success(`已上传 ${selectedFiles.length} 个资料文件，已进入处理队列`);
+      reset();
+      onDone();
+    } catch (err) {
+      const text = err instanceof Error ? err.message : '上传失败';
+      setUploadError(text);
+      message.error(text);
+      setItems((prev) => prev.map((item) => item.status === 'uploading' ? { ...item, status: 'failed', error: text } : item));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return <Modal title="上传资料文件" open={open} onCancel={uploading ? undefined : () => { reset(); onClose(); }} onOk={upload} okText="开始上传" confirmLoading={uploading} maskClosable={!uploading} width={720}>
+    <Upload.Dragger
+      multiple
+      beforeUpload={() => false}
+      accept={DOCUMENT_UPLOAD_EXTENSIONS.map((item) => `.${item}`).join(',')}
+      maxCount={10}
+      fileList={files}
+      onChange={(info) => { setFiles(info.fileList.slice(0, 10)); setUploadError(''); }}
+      disabled={uploading}
+    >
+      <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+      <p>拖拽资料文件到此处，或点击选择文件</p>
+      <p>支持 PDF、Excel、Word docx、TXT/MD；一次最多 10 个，单文件最大 {limits.max_upload_size_mb}MB</p>
+    </Upload.Dragger>
+    {items.length > 0 && <List
+      className="document-upload-list"
+      size="small"
+      dataSource={items}
+      renderItem={(item) => <List.Item>
+        <Space direction="vertical" style={{ width: '100%' }} size={2}>
+          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+            <Text>{item.name}</Text>
+            <Tag color={item.status === 'failed' ? 'red' : item.status === 'queued' ? 'green' : item.status === 'uploading' ? 'blue' : 'default'}>
+              {item.status === 'waiting' ? '等待上传' : item.status === 'uploading' ? '上传中' : item.status === 'queued' ? '已进入处理队列' : '上传失败'}
+            </Tag>
+          </Space>
+          <Progress percent={item.progress} size="small" status={item.status === 'failed' ? 'exception' : item.progress >= 100 ? 'success' : 'active'} />
+          {item.error && <Text type="danger">{item.error}</Text>}
+        </Space>
+      </List.Item>}
+    />}
     {uploadError && <Text type="danger">{uploadError}</Text>}
   </Modal>;
 }
@@ -1441,18 +1639,53 @@ function QueueModal({ open, projectId, clockNow, onClose, onRefresh }: { open: b
 
 function MembersModal({ open, projectId, project, onClose, onRefresh }: { open: boolean; projectId: string; project: Project | null; onClose: () => void; onRefresh: () => void }) {
   const [members, setMembers] = useState<User[]>([]);
-  const [username, setUsername] = useState('');
+  const [memberOptions, setMemberOptions] = useState<User[]>([]);
+  const [memberSearch, setMemberSearch] = useState('');
+  const [selectedUserId, setSelectedUserId] = useState('');
+  const [memberSearching, setMemberSearching] = useState(false);
   const [loading, setLoading] = useState(false);
+  const memberSearchSeq = useRef(0);
   const load = useCallback(async () => {
     if (!open) return;
     const data = await api<{ items: User[] }>(`/api/projects/${projectId}/members`);
     setMembers(data.items);
   }, [open, projectId]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (open) return;
+    setMemberSearch('');
+    setSelectedUserId('');
+    setMemberOptions([]);
+  }, [open]);
+  const searchMembers = useCallback(async (value: string) => {
+    setMemberSearch(value);
+    setSelectedUserId('');
+    const keyword = value.trim();
+    if (!keyword) {
+      setMemberOptions([]);
+      return;
+    }
+    const seq = memberSearchSeq.current + 1;
+    memberSearchSeq.current = seq;
+    setMemberSearching(true);
+    try {
+      const data = await api<{ items: User[] }>(`/api/users/search?project_id=${projectId}&keyword=${encodeURIComponent(keyword)}`);
+      if (memberSearchSeq.current === seq) setMemberOptions(data.items);
+    } catch {
+      if (memberSearchSeq.current === seq) setMemberOptions([]);
+    } finally {
+      if (memberSearchSeq.current === seq) setMemberSearching(false);
+    }
+  }, [projectId]);
   const add = async () => {
-    if (!username.trim()) return;
-    await api(`/api/projects/${projectId}/members`, { method: 'POST', body: JSON.stringify({ username: username.trim() }) });
-    setUsername('');
+    if (!selectedUserId) {
+      message.warning('请先搜索并选择用户');
+      return;
+    }
+    await api(`/api/projects/${projectId}/members`, { method: 'POST', body: JSON.stringify({ user_id: selectedUserId }) });
+    setMemberSearch('');
+    setSelectedUserId('');
+    setMemberOptions([]);
     message.success('成员已添加');
     void load();
   };
@@ -1495,11 +1728,23 @@ function MembersModal({ open, projectId, project, onClose, onRefresh }: { open: 
       </Card>
       <Card size="small" title="项目成员">
         <Space.Compact style={{ width: '100%', marginBottom: 12 }}>
-          <Input placeholder="输入用户名添加成员" value={username} onChange={(e) => setUsername(e.target.value)} onPressEnter={add} />
+          <Select
+            showSearch
+            allowClear
+            value={selectedUserId || undefined}
+            placeholder="搜索用户ID或姓名"
+            filterOption={false}
+            onSearch={searchMembers}
+            onClear={() => { setMemberSearch(''); setSelectedUserId(''); setMemberOptions([]); }}
+            onChange={(value) => setSelectedUserId(value || '')}
+            notFoundContent={memberSearching ? '搜索中...' : '无匹配用户'}
+            style={{ width: '100%' }}
+            options={memberOptions.map((item) => ({ value: item.user_id, label: `${item.display_name || item.username}（${item.username}）` }))}
+          />
           <Button type="primary" onClick={add}>添加</Button>
         </Space.Compact>
         <Table rowKey="user_id" size="small" pagination={false} dataSource={members} columns={[
-          { title: '用户名', dataIndex: 'username' },
+          { title: '用户ID', dataIndex: 'username' },
           { title: '姓名', dataIndex: 'display_name' },
           { title: '角色', dataIndex: 'role', render: (value: string) => value === 'admin' ? '管理员' : '用户' },
           { title: '操作', width: 100, render: (_, row) => row.user_id === project?.owner_id ? <Tag>创建人</Tag> : <Button size="small" danger onClick={() => remove(row.user_id)}>移除</Button> }
@@ -1555,6 +1800,31 @@ type SettingsFormValues = {
   storage: AppSettings['storage'];
 };
 
+function EditableDisplayName({ user, onSave, disabled }: { user: User; onSave: (user: User, displayName: string) => Promise<void>; disabled?: boolean }) {
+  const [value, setValue] = useState(user.display_name || user.username);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setValue(user.display_name || user.username), [user.display_name, user.username]);
+  const save = async () => {
+    const nextValue = value.trim() || user.username;
+    if (nextValue === (user.display_name || user.username)) return;
+    setSaving(true);
+    try {
+      await onSave(user, nextValue);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <Input
+    size="small"
+    value={value}
+    disabled={disabled || saving}
+    suffix={<EditOutlined />}
+    onChange={(event) => setValue(event.target.value)}
+    onBlur={() => { void save(); }}
+    onPressEnter={() => { void save(); }}
+  />;
+}
+
 function AdminPage({ onBack }: { onBack: () => void }) {
   const [users, setUsers] = useState<User[]>([]);
   const [projectUsage, setProjectUsage] = useState<any[]>([]);
@@ -1562,21 +1832,31 @@ function AdminPage({ onBack }: { onBack: () => void }) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [quotaUser, setQuotaUser] = useState<User | null>(null);
+  const [me, setMe] = useState<User | null>(null);
+  const [includeDeleted, setIncludeDeleted] = useState(false);
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [savingDefaultQuota, setSavingDefaultQuota] = useState(false);
   const [form] = Form.useForm();
-  const [quotaForm] = Form.useForm<UserQuota>();
+  const [quotaForm] = Form.useForm<QuotaFormValues>();
+  const [defaultQuotaForm] = Form.useForm<QuotaFormValues>();
   const load = useCallback(async () => {
-    const [userData, projectData, userUsageData, jobData] = await Promise.all([
-      api<{ items: User[] }>('/api/admin/users'),
+    const [meData, userData, defaultQuotaData, projectData, userUsageData, jobData] = await Promise.all([
+      api<User>('/api/auth/me'),
+      api<{ items: User[] }>(`/api/admin/users?include_deleted=${includeDeleted ? 'true' : 'false'}`),
+      api<UserQuota>('/api/admin/default-quota'),
       api<{ items: any[] }>('/api/admin/usage/projects'),
       api<{ items: any[] }>('/api/admin/usage/users'),
       api<{ items: Job[] }>('/api/jobs/recent?page_size=50'),
     ]);
+    setMe(meData);
     setUsers(userData.items);
+    defaultQuotaForm.setFieldsValue(quotaToFormValues(defaultQuotaData));
     setProjectUsage(projectData.items);
     setUserUsage(userUsageData.items);
     setJobs(jobData.items);
-  }, []);
+  }, [defaultQuotaForm, includeDeleted]);
   useEffect(() => { void load().catch((err) => message.error((err as Error).message)); }, [load]);
+  useEffect(() => setSelectedUserIds([]), [includeDeleted]);
   const createUser = async () => {
     const values = await form.validateFields();
     await api('/api/admin/users', { method: 'POST', body: JSON.stringify(values) });
@@ -1593,44 +1873,112 @@ function AdminPage({ onBack }: { onBack: () => void }) {
   const openQuota = async (user: User) => {
     const quota = await api<UserQuota>(`/api/admin/users/${user.user_id}/quota`);
     setQuotaUser(user);
-    quotaForm.setFieldsValue(quota);
+    quotaForm.setFieldsValue(quotaToFormValues(quota));
   };
   const saveQuota = async () => {
     if (!quotaUser) return;
     const values = await quotaForm.validateFields();
-    await api(`/api/admin/users/${quotaUser.user_id}/quota`, { method: 'PATCH', body: JSON.stringify(values) });
+    await api(`/api/admin/users/${quotaUser.user_id}/quota`, { method: 'PATCH', body: JSON.stringify(formValuesToQuota(values)) });
     message.success('限额已保存');
     setQuotaUser(null);
     void load();
   };
+  const saveDefaultQuota = async () => {
+    const values = await defaultQuotaForm.validateFields();
+    setSavingDefaultQuota(true);
+    try {
+      const data = await api<UserQuota & { updated_user_count?: number }>('/api/admin/default-quota', { method: 'PATCH', body: JSON.stringify(formValuesToQuota(values)) });
+      defaultQuotaForm.setFieldsValue(quotaToFormValues(data));
+      message.success(`默认限额已保存并同步到 ${data.updated_user_count ?? 0} 个用户`);
+      void load();
+    } finally {
+      setSavingDefaultQuota(false);
+    }
+  };
+  const deleteUser = (user: User) => {
+    Modal.confirm({
+      title: `删除用户：${user.display_name || user.username}`,
+      content: '本操作为软删除：用户将不能登录，也不会出现在默认列表中；历史项目、文件和用量记录会保留。',
+      okText: '删除',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        await api(`/api/admin/users/${user.user_id}`, { method: 'DELETE' });
+        message.success('用户已删除');
+        setSelectedUserIds((ids) => ids.filter((id) => id !== user.user_id));
+        void load();
+      },
+    });
+  };
+  const batchDeleteUsers = () => {
+    if (!selectedUserIds.length) return;
+    Modal.confirm({
+      title: `批量删除 ${selectedUserIds.length} 个用户`,
+      content: '本操作为软删除，历史数据会保留。当前登录管理员和已删除用户会自动跳过。',
+      okText: '批量删除',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        const result = await api<{ deleted_count: number; skipped_user_ids: string[] }>('/api/admin/users/batch-delete', { method: 'POST', body: JSON.stringify({ user_ids: selectedUserIds }) });
+        message.success(`已删除 ${result.deleted_count} 个用户`);
+        setSelectedUserIds([]);
+        void load();
+      },
+    });
+  };
+  const userTableExtra = <Space>
+    <Checkbox checked={includeDeleted} onChange={(event) => setIncludeDeleted(event.target.checked)}>显示已删除用户</Checkbox>
+    <Button danger disabled={!selectedUserIds.length} onClick={batchDeleteUsers}>批量删除</Button>
+    <Button type="primary" onClick={() => setCreateOpen(true)}>新建用户</Button>
+  </Space>;
   return <>
     <Header className="topbar"><Space><Button onClick={onBack}>返回</Button><Title level={3}>管理后台</Title></Space></Header>
     <Content className="home-content settings-content">
       <Tabs items={[
-        { key: 'users', label: '用户管理', children: <Card extra={<Button type="primary" onClick={() => setCreateOpen(true)}>新建用户</Button>}>
-          <Table rowKey="user_id" dataSource={users} pagination={false} columns={[
-            { title: '用户名', dataIndex: 'username' },
-            { title: '姓名', dataIndex: 'display_name' },
-            { title: '角色', dataIndex: 'role', render: (value: string, row: User) => <Select size="small" value={value} style={{ width: 100 }} onChange={(role) => updateUser(row, { role: role as User['role'] })} options={[{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }]} /> },
-            { title: '状态', dataIndex: 'status', render: (value: string, row: User) => <Select size="small" value={value} style={{ width: 100 }} onChange={(status) => updateUser(row, { status: status as User['status'] })} options={[{ value: 'active', label: '启用' }, { value: 'disabled', label: '停用' }]} /> },
-            { title: '操作', render: (_, row) => <Space><Button size="small" onClick={() => openQuota(row)}>限额</Button><Button size="small" onClick={() => Modal.confirm({ title: '重置密码', content: <Input.Password id="reset-password-input" placeholder="输入新密码" />, onOk: async () => { const input = document.getElementById('reset-password-input') as HTMLInputElement | null; await api(`/api/admin/users/${row.user_id}/reset-password`, { method: 'POST', body: JSON.stringify({ password: input?.value || '' }) }); message.success('密码已重置'); } })}>重置密码</Button></Space> }
-          ]} />
-        </Card> },
+        { key: 'users', label: '用户管理', children: <Space direction="vertical" style={{ width: '100%' }}>
+          <Card size="small" title="统一默认限额" extra={<Button type="primary" loading={savingDefaultQuota} onClick={saveDefaultQuota}>保存并同步全部用户</Button>}>
+            <Form form={defaultQuotaForm} layout="inline">
+              <Form.Item name="daily_asr_hours" label="每日 ASR" tooltip="单位：小时；0 表示不限"><InputNumber min={0} precision={2} addonAfter="小时" style={{ width: 150 }} /></Form.Item>
+              <Form.Item name="monthly_asr_hours" label="每月 ASR" tooltip="单位：小时；0 表示不限"><InputNumber min={0} precision={2} addonAfter="小时" style={{ width: 150 }} /></Form.Item>
+              <Form.Item name="daily_qa_ktokens" label="每日问答" tooltip="单位：KToken；0 表示不限"><InputNumber min={0} precision={2} addonAfter="KToken" style={{ width: 170 }} /></Form.Item>
+              <Form.Item name="monthly_qa_ktokens" label="每月问答" tooltip="单位：KToken；0 表示不限"><InputNumber min={0} precision={2} addonAfter="KToken" style={{ width: 170 }} /></Form.Item>
+            </Form>
+          </Card>
+          <Card extra={userTableExtra}>
+            <Table
+              rowKey="user_id"
+              dataSource={users}
+              pagination={false}
+              rowSelection={{
+                selectedRowKeys: selectedUserIds,
+                onChange: (keys: Key[]) => setSelectedUserIds(keys.map(String)),
+                getCheckboxProps: (record: User) => ({ disabled: record.user_id === me?.user_id || record.status === 'deleted' }),
+              }}
+              columns={[
+                { title: '用户ID', dataIndex: 'username' },
+                { title: '姓名', dataIndex: 'display_name', render: (_: string, row: User) => <EditableDisplayName user={row} disabled={row.status === 'deleted'} onSave={(target, displayName) => updateUser(target, { display_name: displayName })} /> },
+                { title: '角色', dataIndex: 'role', render: (value: string, row: User) => <Select size="small" value={value} disabled={row.status === 'deleted'} style={{ width: 100 }} onChange={(role) => updateUser(row, { role: role as User['role'] })} options={[{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }]} /> },
+                { title: '状态', dataIndex: 'status', render: (value: string, row: User) => value === 'deleted' ? <Tag color="red">已删除</Tag> : <Select size="small" value={value} disabled={row.user_id === me?.user_id} style={{ width: 100 }} onChange={(status) => updateUser(row, { status: status as User['status'] })} options={[{ value: 'active', label: '启用' }, { value: 'disabled', label: '停用' }]} /> },
+                { title: '每日ASR', render: (_: unknown, row: User) => formatHoursFromSeconds(row.quota?.daily_asr_seconds) },
+                { title: '每日问答', render: (_: unknown, row: User) => formatKTokens(row.quota?.daily_qa_tokens) },
+                { title: '操作', render: (_: unknown, row: User) => <Space><Button size="small" disabled={row.status === 'deleted'} onClick={() => openQuota(row)}>限额</Button><Button size="small" disabled={row.status === 'deleted'} onClick={() => Modal.confirm({ title: '重置密码', content: <Input.Password id="reset-password-input" placeholder="输入新密码" />, onOk: async () => { const input = document.getElementById('reset-password-input') as HTMLInputElement | null; await api(`/api/admin/users/${row.user_id}/reset-password`, { method: 'POST', body: JSON.stringify({ password: input?.value || '' }) }); message.success('密码已重置'); } })}>重置密码</Button><Button size="small" danger disabled={row.user_id === me?.user_id || row.status === 'deleted'} onClick={() => deleteUser(row)}>删除</Button></Space> }
+              ]}
+            />
+          </Card>
+        </Space> },
         { key: 'projectUsage', label: '项目用量报表', children: <Card><Table rowKey="project_id" dataSource={projectUsage} pagination={{ pageSize: 10 }} columns={[
           { title: '项目', dataIndex: 'project_name' },
           { title: '文件数', dataIndex: 'file_count' },
-          { title: '录音总时长', dataIndex: 'audio_duration_seconds', render: formatDuration },
+          { title: '录音总时长', dataIndex: 'audio_duration_seconds', render: formatHoursFromSeconds },
           { title: '问答次数', dataIndex: 'qa_count' },
-          { title: '输入 Token', dataIndex: 'qa_input_tokens' },
-          { title: '输出 Token', dataIndex: 'qa_output_tokens' },
+          { title: '输入', dataIndex: 'qa_input_tokens', render: formatKTokens },
+          { title: '输出', dataIndex: 'qa_output_tokens', render: formatKTokens },
         ]} /></Card> },
         { key: 'userUsage', label: '用户用量报表', children: <Card><Table rowKey="user_id" dataSource={userUsage} pagination={{ pageSize: 10 }} columns={[
           { title: '用户', dataIndex: 'display_name' },
-          { title: '录音处理量', dataIndex: 'audio_duration_seconds', render: formatDuration },
+          { title: '录音处理量', dataIndex: 'audio_duration_seconds', render: formatHoursFromSeconds },
           { title: 'ASR次数', dataIndex: 'asr_count' },
           { title: '问答次数', dataIndex: 'qa_count' },
-          { title: '输入 Token', dataIndex: 'qa_input_tokens' },
-          { title: '输出 Token', dataIndex: 'qa_output_tokens' },
+          { title: '输入', dataIndex: 'qa_input_tokens', render: formatKTokens },
+          { title: '输出', dataIndex: 'qa_output_tokens', render: formatKTokens },
         ]} /></Card> },
         { key: 'jobs', label: '任务监控', children: <Card><Table rowKey="job_id" dataSource={jobs} pagination={{ pageSize: 10 }} columns={[
           { title: '任务', dataIndex: 'job_type', render: jobTypeLabel },
@@ -1642,7 +1990,7 @@ function AdminPage({ onBack }: { onBack: () => void }) {
       ]} />
       <Modal title="新建用户" open={createOpen} onOk={createUser} onCancel={() => setCreateOpen(false)} okText="创建" cancelText="取消">
         <Form form={form} layout="vertical" initialValues={{ role: 'user', status: 'active' }}>
-          <Form.Item name="username" label="用户名" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="username" label="用户ID" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="display_name" label="姓名"><Input /></Form.Item>
           <Form.Item name="password" label="初始密码" rules={[{ required: true }]}><Input.Password /></Form.Item>
           <Form.Item name="role" label="角色"><Select options={[{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }]} /></Form.Item>
@@ -1651,10 +1999,10 @@ function AdminPage({ onBack }: { onBack: () => void }) {
       </Modal>
       <Modal title={`设置限额：${quotaUser?.display_name || ''}`} open={!!quotaUser} onOk={saveQuota} onCancel={() => setQuotaUser(null)} okText="保存" cancelText="取消">
         <Form form={quotaForm} layout="vertical">
-          <Form.Item name="daily_asr_seconds" label="每日 ASR 时长上限（秒，0 表示不限）"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
-          <Form.Item name="monthly_asr_seconds" label="每月 ASR 时长上限（秒，0 表示不限）"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
-          <Form.Item name="daily_qa_tokens" label="每日问答 Token 上限（0 表示不限）"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
-          <Form.Item name="monthly_qa_tokens" label="每月问答 Token 上限（0 表示不限）"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="daily_asr_hours" label="每日 ASR 时长上限（小时，0 表示不限）"><InputNumber min={0} precision={2} addonAfter="小时" style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="monthly_asr_hours" label="每月 ASR 时长上限（小时，0 表示不限）"><InputNumber min={0} precision={2} addonAfter="小时" style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="daily_qa_ktokens" label="每日问答 Token 上限（KToken，0 表示不限）"><InputNumber min={0} precision={2} addonAfter="KToken" style={{ width: '100%' }} /></Form.Item>
+          <Form.Item name="monthly_qa_ktokens" label="每月问答 Token 上限（KToken，0 表示不限）"><InputNumber min={0} precision={2} addonAfter="KToken" style={{ width: '100%' }} /></Form.Item>
         </Form>
       </Modal>
     </Content>
