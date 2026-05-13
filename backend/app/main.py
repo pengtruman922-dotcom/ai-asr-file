@@ -46,7 +46,7 @@ from .settings_service import (
     save_app_settings,
     save_upload_settings,
 )
-from .tasks import create_job, enqueue_job, retry_failed_job
+from .tasks import cancel_queued_job, create_job, enqueue_job, queue_name_for_job_type, retry_failed_job
 from .utils import fail, make_token, new_id, ok, require_auth, serialize_dt
 
 settings = get_settings()
@@ -314,7 +314,7 @@ def project_payload(project: Project, db: Session, user: User | None = None):
 def recording_payload(recording: Recording, db: Session | None = None):
     current_job = None
     latest_failed_job = None
-    if db and recording.status not in {"created", "completed", "failed"}:
+    if db:
         current_job = (
             db.query(ProcessingJob)
             .filter(ProcessingJob.recording_id == recording.id, ProcessingJob.status.in_(["queued", "running"]))
@@ -353,6 +353,7 @@ def recording_payload(recording: Recording, db: Session | None = None):
     if current_job:
         payload.update(
             {
+                "current_job_id": current_job.id,
                 "current_job_type": current_job.job_type,
                 "current_job_status": current_job.status,
                 "current_job_created_at": serialize_dt(current_job.created_at),
@@ -381,7 +382,7 @@ def file_payload(project_file: ProjectFile, db: Session | None = None, reference
             project_file.duration_seconds = recording.duration_seconds or project_file.duration_seconds
     current_job = None
     latest_failed_job = None
-    if db and status not in {"created", "completed", "failed"}:
+    if db:
         current_job = (
             db.query(ProcessingJob)
             .filter(ProcessingJob.file_id == project_file.id, ProcessingJob.status.in_(["queued", "running"]))
@@ -421,6 +422,7 @@ def file_payload(project_file: ProjectFile, db: Session | None = None, reference
     if current_job:
         payload.update(
             {
+                "current_job_id": current_job.id,
                 "current_job_type": current_job.job_type,
                 "current_job_status": current_job.status,
                 "current_job_created_at": serialize_dt(current_job.created_at),
@@ -441,6 +443,8 @@ def file_payload(project_file: ProjectFile, db: Session | None = None, reference
 
 
 def job_payload(job: ProcessingJob):
+    metadata = dict(job.metadata_json or {})
+    queue_name = str(metadata.get("queue_name") or queue_name_for_job_type(job.job_type))
     return {
         "job_id": job.id,
         "project_id": job.project_id,
@@ -448,10 +452,11 @@ def job_payload(job: ProcessingJob):
         "file_id": job.file_id,
         "user_id": job.user_id,
         "job_type": job.job_type,
+        "queue_name": queue_name,
         "status": job.status,
         "progress": job.progress,
         "external_task_id": job.external_task_id,
-        "metadata": job.metadata_json,
+        "metadata": metadata,
         "error_code": job.error_code,
         "error_message": job.error_message,
         "created_at": serialize_dt(job.created_at),
@@ -1516,6 +1521,18 @@ async def regenerate_summary(recording_id: str, request: Request, db: Session = 
         ensure_project_access(recording.project_id, user, db, allow_shared=False)
     except HTTPException as exc:
         return fail(str(exc.detail), "录音不存在或无权访问", status_code=exc.status_code)
+    existing_job = (
+        db.query(ProcessingJob)
+        .filter(
+            ProcessingJob.recording_id == recording.id,
+            ProcessingJob.job_type == "summary_generation",
+            ProcessingJob.status.in_(["queued", "running"]),
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .first()
+    )
+    if existing_job:
+        return fail("SUMMARY_JOB_IN_PROGRESS", "纪要生成任务正在排队或运行中，请勿重复提交")
     project_file = db.query(ProjectFile).filter_by(recording_id=recording.id).first()
     job = create_job(db, recording.project_id, recording.id, "summary_generation", {"file_id": project_file.id if project_file else None, "user_id": user.id})
     db.commit()
@@ -1892,6 +1909,26 @@ def retry_job(job_id: str):
     except ValueError:
         return fail("JOB_NOT_RETRYABLE", "只有失败任务可以重试")
     return ok({"new_job_id": new_job_id, "status": "queued"})
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, request: Request, db: Session = Depends(get_db)):
+    job = db.get(ProcessingJob, job_id)
+    if not job:
+        return fail("JOB_NOT_FOUND", "任务不存在", status_code=404)
+    user = current_user(request, db)
+    if job.project_id:
+        try:
+            ensure_project_access(job.project_id, user, db, allow_shared=False)
+        except HTTPException as exc:
+            return fail(str(exc.detail), "任务不存在或无权访问", status_code=exc.status_code)
+    try:
+        cancel_queued_job(job_id)
+    except ValueError as exc:
+        if str(exc) == "JOB_NOT_FOUND":
+            return fail("JOB_NOT_FOUND", "任务不存在", status_code=404)
+        return fail("JOB_NOT_CANCELABLE", "只能取消排队中的任务")
+    return ok({"job_id": job_id, "status": "canceled"})
 
 
 @app.post("/api/recordings/{recording_id}/exports")

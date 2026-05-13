@@ -51,22 +51,28 @@ def enqueue_job(job_id: str) -> None:
 
     with session_scope() as session:
         job = session.get(ProcessingJob, job_id)
-        queue_name = queue_name_for_job_type(job.job_type) if job else "default"
+        metadata = dict(job.metadata_json or {}) if job else {}
+        queue_name = str(metadata.get("queue_name") or (queue_name_for_job_type(job.job_type) if job else "default"))
+        if job and metadata.get("queue_name") != queue_name:
+            metadata["queue_name"] = queue_name
+            job.metadata_json = metadata
 
     queue = Queue(queue_name, connection=Redis.from_url(settings.redis_url))
     queue.enqueue("app.tasks.run_job", job_id, job_timeout="6h")
 
 
 def create_job(session, project_id: str | None, recording_id: str | None, job_type: str, metadata: dict | None = None) -> ProcessingJob:
+    metadata = dict(metadata or {})
+    metadata.setdefault("queue_name", queue_name_for_job_type(job_type))
     job = ProcessingJob(
         id=new_id("job"),
         project_id=project_id,
         recording_id=recording_id,
-        file_id=(metadata or {}).get("file_id"),
-        user_id=(metadata or {}).get("user_id"),
+        file_id=metadata.get("file_id"),
+        user_id=metadata.get("user_id"),
         job_type=job_type,
         status="queued",
-        metadata_json=metadata or {},
+        metadata_json=metadata,
     )
     session.add(job)
     session.flush()
@@ -78,6 +84,8 @@ def run_job(job_id: str) -> None:
     with session_scope() as session:
         job = session.get(ProcessingJob, job_id)
         if not job:
+            return
+        if job.status == "canceled":
             return
         job_type = job.job_type
         job.status = "running"
@@ -182,6 +190,42 @@ def retry_failed_job(job_id: str) -> str:
                     project_file.status = "cleaning_completed"
     enqueue_job(new_id_value)
     return new_id_value
+
+
+def cancel_queued_job(job_id: str) -> None:
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        if not job:
+            raise ValueError("JOB_NOT_FOUND")
+        if job.status != "queued":
+            raise ValueError("JOB_NOT_CANCELABLE")
+
+        job.status = "canceled"
+        job.progress = 100
+        job.error_code = "JOB_CANCELED"
+        job.error_message = "用户取消排队任务"
+        job.finished_at = datetime.now(timezone.utc)
+        metadata = dict(job.metadata_json or {})
+        metadata["canceled_at"] = job.finished_at.isoformat()
+        job.metadata_json = metadata
+
+        recording = session.get(Recording, job.recording_id) if job.recording_id else None
+        project_file = session.get(ProjectFile, job.file_id) if job.file_id else None
+        if job.job_type == "asr_transcription":
+            if recording:
+                recording.status = "canceled"
+            if project_file:
+                project_file.status = "canceled"
+        elif job.job_type == "extract_text" and project_file:
+            project_file.status = "canceled"
+            project_file.extraction_status = "canceled"
+
+        message_id = metadata.get("assistant_message_id")
+        if message_id:
+            message = session.get(QAMessage, message_id)
+            if message:
+                message.status = "canceled"
+                message.error_code = "JOB_CANCELED"
 
 
 def _asr_speaker_count_from_metadata(metadata: dict | None) -> int | None:

@@ -33,6 +33,7 @@ export type Recording = {
   summary_stale: boolean;
   created_at?: string;
   updated_at?: string;
+  current_job_id?: string;
   current_job_type?: string;
   current_job_status?: string;
   current_job_created_at?: string;
@@ -58,7 +59,9 @@ export type Job = {
   job_id: string;
   project_id?: string;
   recording_id?: string;
+  file_id?: string;
   job_type: string;
+  queue_name?: string;
   status: string;
   progress: number;
   external_task_id?: string;

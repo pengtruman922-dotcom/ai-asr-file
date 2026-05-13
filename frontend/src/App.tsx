@@ -58,7 +58,8 @@ type RecordingStatus =
   | 'extracting'
   | 'extracted'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'canceled';
 
 const RECORDING_STATUS_LABELS: Record<string, string> = {
   // Backend canonical statuses. Keep these in sync with backend/app/main.py and backend/app/tasks.py.
@@ -74,6 +75,7 @@ const RECORDING_STATUS_LABELS: Record<string, string> = {
   extracted: '文字提取完成',
   completed: '处理完成',
   failed: '处理失败',
+  canceled: '已取消',
   // UI-only aliases kept for compatibility with visual refactors; business logic normalizes them first.
   uploaded: '已上传',
   pending: '排队中',
@@ -186,6 +188,14 @@ const JOB_STATUS_LABELS: Record<string, string> = {
   running: '运行中',
   succeeded: '已完成',
   failed: '失败',
+  canceled: '已取消',
+};
+
+const QUEUE_LABELS: Record<string, string> = {
+  default: '默认',
+  asr: 'ASR',
+  llm: 'LLM',
+  extract: '资料提取',
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -233,6 +243,10 @@ function jobStatusLabel(status: string) {
   return JOB_STATUS_LABELS[status] || status || '-';
 }
 
+function queueLabel(queue?: string) {
+  return QUEUE_LABELS[queue || 'default'] || queue || '-';
+}
+
 function isRecordingProcessing(status?: string) {
   const normalized = normalizeRecordingStatus(status);
   return Boolean(normalized && PROCESSING_RECORDING_STATUSES.has(normalized));
@@ -240,7 +254,7 @@ function isRecordingProcessing(status?: string) {
 
 function isRecordingPlayable(status?: string) {
   const normalized = normalizeRecordingStatus(status);
-  return Boolean(normalized && !['created', 'uploading', 'failed'].includes(normalized));
+  return Boolean(normalized && !['created', 'uploading', 'failed', 'canceled'].includes(normalized));
 }
 
 function isRecordingReadyForQa(status?: string) {
@@ -689,6 +703,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const [fileDetail, setFileDetail] = useState<Recording | null>(null);
   const [showRaw, setShowRaw] = useState(false);
   const [summary, setSummary] = useState<any>(null);
+  const [summarySubmitting, setSummarySubmitting] = useState(false);
   const [threads, setThreads] = useState<QAThread[]>([]);
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<QAMessage[]>([]);
@@ -712,6 +727,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const selectedRecording = recordings.find((item) => fileKey(item) === selectedId) || null;
   const selectedRecordingId = selectedRecording?.recording_id || null;
   const selectedRecordingPlayable = isAudioFile(selectedRecording) && isRecordingPlayable(selectedRecording?.status);
+  const summaryJobInProgress = selectedRecording?.current_job_type === 'summary_generation' && ['queued', 'running'].includes(selectedRecording.current_job_status || '');
   const pendingQaAnswer = messages.some((item) => item.role === 'assistant' && ['queued', 'running'].includes(item.status));
 
   const loadProject = useCallback(async () => {
@@ -907,9 +923,15 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
 
   const regenerateSummary = async () => {
     if (!selectedRecording?.recording_id || !isAudioFile(selectedRecording)) return;
-    await api(`/api/recordings/${selectedRecording.recording_id}/summary/regenerate`, { method: 'POST', body: JSON.stringify({}) });
-    message.success('已提交重新生成纪要任务');
-    setTimeout(() => { void loadProject(); void loadSelected(); }, 1000);
+    if (summaryJobInProgress || summarySubmitting) return;
+    setSummarySubmitting(true);
+    try {
+      await api(`/api/recordings/${selectedRecording.recording_id}/summary/regenerate`, { method: 'POST', body: JSON.stringify({}) });
+      message.success('已提交重新生成纪要任务');
+      setTimeout(() => { void loadProject(); void loadSelected(); }, 1000);
+    } finally {
+      setSummarySubmitting(false);
+    }
   };
 
   const createThread = async () => {
@@ -1184,7 +1206,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
         <ColumnResizeHandle side="right" active={activeResize === 'right'} onPointerDown={(event) => startColumnResize('right', event)} onDoubleClick={resetColumnWidths} />
         <aside className="right-panel panel-scroll">
           <Tabs defaultActiveKey="summary" items={[
-            { key: 'summary', label: isAudioFile(selectedRecording) ? '纪要' : '文件信息', children: isAudioFile(selectedRecording) ? <SummaryView summary={summary} stale={selectedRecording?.summary_stale || summary?.stale} onExport={() => exportMd('summary')} onRegenerate={regenerateSummary} /> : <FileInfoView file={fileDetail || selectedRecording} /> },
+            { key: 'summary', label: isAudioFile(selectedRecording) ? '纪要' : '文件信息', children: isAudioFile(selectedRecording) ? <SummaryView summary={summary} stale={selectedRecording?.summary_stale || summary?.stale} regenerating={summaryJobInProgress || summarySubmitting} onExport={() => exportMd('summary')} onRegenerate={regenerateSummary} /> : <FileInfoView file={fileDetail || selectedRecording} /> },
             { key: 'qa', label: '问答', children: <QAView checked={checkedIds} recordings={recordings} threads={threads} currentThreadId={currentThreadId} setCurrentThreadId={setCurrentThreadId} messages={messages} question={qaQuestion} setQuestion={setQaQuestion} onAsk={ask} onNewThread={createThread} submitting={qaSubmitting} waitingForAnswer={pendingQaAnswer} /> }
           ]} />
         </aside>
@@ -1314,10 +1336,10 @@ function SegmentEditor({ segment, showRaw, onJump, onSave }: { segment: Transcri
   </Card>;
 }
 
-function SummaryView({ summary, stale, onExport, onRegenerate }: { summary: any; stale?: boolean; onExport: () => void; onRegenerate: () => void }) {
+function SummaryView({ summary, stale, regenerating, onExport, onRegenerate }: { summary: any; stale?: boolean; regenerating?: boolean; onExport: () => void; onRegenerate: () => void }) {
   const markdown = summary?.content?.markdown || '';
   return <Space direction="vertical" style={{ width: '100%' }}>
-    {stale && <Space><Tag color="orange">清洁稿已编辑，纪要可能过期</Tag><Button size="small" icon={<ReloadOutlined />} onClick={onRegenerate}>重新生成纪要</Button></Space>}
+    {stale && <Space><Tag color="orange">清洁稿已编辑，纪要可能过期</Tag><Button size="small" icon={<ReloadOutlined />} loading={regenerating} disabled={regenerating} onClick={onRegenerate}>{regenerating ? '纪要生成中' : '重新生成纪要'}</Button></Space>}
     <Button icon={<DownloadOutlined />} onClick={onExport}>导出纪要 Markdown</Button>
     <MarkdownLite markdown={markdown || '暂无纪要'} />
   </Space>;
@@ -1674,12 +1696,27 @@ function QueueModal({ open, projectId, clockNow, onClose, onRefresh }: { open: b
     return () => window.clearInterval(timer);
   }, [open, load, onRefresh]);
   const retry = async (job: Job) => { await api(`/api/jobs/${job.job_id}/retry`, { method: 'POST' }); message.success('已重试'); void load(); onRefresh(); };
-  return <Modal title="处理队列" open={open} onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={900}><Table rowKey="job_id" dataSource={jobs} pagination={false} columns={[
+  const cancel = (job: Job) => {
+    Modal.confirm({
+      title: '取消排队任务？',
+      content: '仅排队中的任务可以取消，运行中的任务不会被中断。',
+      okText: '取消任务',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        await api(`/api/jobs/${job.job_id}/cancel`, { method: 'POST' });
+        message.success('已取消排队任务');
+        void load();
+        onRefresh();
+      },
+    });
+  };
+  return <Modal title="处理队列" open={open} onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={980}><Table rowKey="job_id" dataSource={jobs} pagination={false} columns={[
     { title: '任务', dataIndex: 'job_type', render: (value: string) => jobTypeLabel(value) },
-    { title: '状态', dataIndex: 'status', render: (value: string, job: Job) => <Space><Tag color={value === 'failed' ? 'red' : ['queued', 'running'].includes(value) ? 'blue' : 'green'}>{jobStatusLabel(value)}</Tag>{['queued', 'running'].includes(value) && <Text type="secondary">{elapsedSince(job.started_at || job.created_at, clockNow)}</Text>}</Space> },
+    { title: '队列', dataIndex: 'queue_name', width: 100, render: (value: string) => <Tag>{queueLabel(value)}</Tag> },
+    { title: '状态', dataIndex: 'status', render: (value: string, job: Job) => <Space><Tag color={value === 'failed' ? 'red' : value === 'canceled' ? 'default' : ['queued', 'running'].includes(value) ? 'blue' : 'green'}>{jobStatusLabel(value)}</Tag>{['queued', 'running'].includes(value) && <Text type="secondary">{elapsedSince(job.started_at || job.created_at, clockNow)}</Text>}</Space> },
     { title: '进度', dataIndex: 'progress', width: 150, render: (value: number) => <Progress percent={value || 0} size="small" /> },
     { title: '错误', dataIndex: 'error_message' },
-    { title: '操作', render: (_, job) => job.status === 'failed' ? <Button onClick={() => retry(job)}>重试</Button> : null }
+    { title: '操作', width: 120, render: (_, job) => job.status === 'failed' ? <Button onClick={() => retry(job)}>重试</Button> : job.status === 'queued' ? <Button danger onClick={() => cancel(job)}>取消</Button> : null }
   ]} /></Modal>;
 }
 
