@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/app.db"
     redis_url: str = "redis://localhost:6379/0"
     queue_sync: bool = False
+    task_queue_routing: str = "default"
+    worker_queues: str = ""
 
     storage_provider: str = "railway_bucket"
     storage_mock_enabled: bool = False

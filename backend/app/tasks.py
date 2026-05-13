@@ -24,6 +24,23 @@ from .storage import storage
 from .utils import new_id
 
 
+JOB_QUEUE_MAP = {
+    "asr_transcription": "asr",
+    "clean_transcript": "llm",
+    "summary_generation": "llm",
+    "qa_answer": "llm",
+    "extract_text": "extract",
+    "export": "default",
+}
+
+
+def queue_name_for_job_type(job_type: str) -> str:
+    settings = get_settings()
+    if settings.task_queue_routing.strip().lower() == "split":
+        return JOB_QUEUE_MAP.get(job_type, "default")
+    return "default"
+
+
 def enqueue_job(job_id: str) -> None:
     settings = get_settings()
     if settings.app_env == "local" and settings.queue_sync:
@@ -32,7 +49,11 @@ def enqueue_job(job_id: str) -> None:
     from redis import Redis
     from rq import Queue
 
-    queue = Queue("default", connection=Redis.from_url(settings.redis_url))
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        queue_name = queue_name_for_job_type(job.job_type) if job else "default"
+
+    queue = Queue(queue_name, connection=Redis.from_url(settings.redis_url))
     queue.enqueue("app.tasks.run_job", job_id, job_timeout="6h")
 
 

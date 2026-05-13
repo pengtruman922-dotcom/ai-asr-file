@@ -71,6 +71,14 @@ Create two Railway services from the same repo/root:
 - Keep the root `Dockerfile` enabled unless you intentionally switch to Railway's Python builder. The Dockerfile is responsible for building the frontend before FastAPI serves it.
 - Production does not silently fall back to mock ASR/LLM or local storage. If credentials are missing, the app returns a clear configuration error.
 
+Optional split workers:
+
+- Keep one default worker with `python -m app.worker default` for legacy/default jobs.
+- Add an ASR worker with `python -m app.worker asr`.
+- Add an LLM worker with `python -m app.worker llm`.
+- Add an extraction worker with `python -m app.worker extract`.
+- Set `TASK_QUEUE_ROUTING=split` on the web service and every worker only after all split workers are deployed. Without this variable, jobs continue to use the legacy `default` queue.
+
 Required production variables:
 
 ```text
