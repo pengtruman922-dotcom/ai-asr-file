@@ -926,7 +926,15 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     if (summaryJobInProgress || summarySubmitting) return;
     setSummarySubmitting(true);
     try {
-      await api(`/api/recordings/${selectedRecording.recording_id}/summary/regenerate`, { method: 'POST', body: JSON.stringify({}) });
+      const data = await api<{ job_id: string }>(`/api/recordings/${selectedRecording.recording_id}/summary/regenerate`, { method: 'POST', body: JSON.stringify({}) });
+      setRecordings((prev) => prev.map((item) => fileKey(item) === selectedId ? {
+        ...item,
+        current_job_id: data.job_id,
+        current_job_type: 'summary_generation',
+        current_job_status: 'queued',
+        current_job_created_at: new Date().toISOString(),
+        current_job_started_at: undefined,
+      } : item));
       message.success('已提交重新生成纪要任务');
       setTimeout(() => { void loadProject(); void loadSelected(); }, 1000);
     } finally {
@@ -1074,6 +1082,22 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     void loadSelected();
   };
 
+  const cancelQueuedJob = (jobId?: string) => {
+    if (!jobId) return;
+    Modal.confirm({
+      title: '取消排队任务？',
+      content: '仅排队中的任务可以取消，运行中的任务不会被中断。',
+      okText: '取消任务',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        await api(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
+        message.success('已取消排队任务');
+        void loadProject();
+        void loadSelected();
+      },
+    });
+  };
+
   const toggleRecordingCheck = (id: string, checked: boolean) => {
     selectionTouchedRef.current = true;
     setCheckedIds((prev) => {
@@ -1173,6 +1197,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
               onCheck={(checked) => toggleRecordingCheck(fileKey(rec), checked)}
               onRename={(name) => renameRecording(fileKey(rec), name)}
               onRetry={(jobId) => retryFailedRecording(jobId)}
+              onCancelJob={(jobId) => cancelQueuedJob(jobId)}
               onDelete={() => deleteRecording(fileKey(rec))}
             />
           )} />
@@ -1232,7 +1257,7 @@ function ColumnResizeHandle({ side, active, onPointerDown, onDoubleClick }: { si
   />;
 }
 
-function RecordingListItem({ recording, active, checked, checkDisabled, clockNow, onSelect, onCheck, onRename, onRetry, onDelete }: { recording: Recording; active: boolean; checked: boolean; checkDisabled: boolean; clockNow: number; onSelect: () => void; onCheck: (checked: boolean) => void; onRename: (name: string) => void; onRetry: (jobId?: string) => void; onDelete: () => void }) {
+function RecordingListItem({ recording, active, checked, checkDisabled, clockNow, onSelect, onCheck, onRename, onRetry, onCancelJob, onDelete }: { recording: Recording; active: boolean; checked: boolean; checkDisabled: boolean; clockNow: number; onSelect: () => void; onCheck: (checked: boolean) => void; onRename: (name: string) => void; onRetry: (jobId?: string) => void; onCancelJob: (jobId?: string) => void; onDelete: () => void }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(recording.file_name);
   const skipBlurSaveRef = useRef(false);
@@ -1250,6 +1275,7 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
     recording.source === 'reference' ? '引用文件' : '',
   ].filter(Boolean).join(' · ');
   const unavailable = ['source_unshared', 'source_deleted', 'file_deleted'].includes(recording.reference_status || '');
+  const canCancelCurrentJob = recording.current_job_status === 'queued' && Boolean(recording.current_job_id);
   const save = () => {
     if (skipBlurSaveRef.current) {
       skipBlurSaveRef.current = false;
@@ -1291,6 +1317,7 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
         {recording.status === 'failed' && recording.latest_failed_job_error_message && <Text type="secondary" className="recording-error" title={recording.latest_failed_job_error_message}>{recording.latest_failed_job_error_message}</Text>}
         <Text type="secondary" className="recording-meta">{mediaMeta}</Text>
         {recording.status === 'failed' && <Button size="small" type="link" className="recording-retry" onClick={(e) => { e.stopPropagation(); void onRetry(recording.latest_failed_job_id); }}>重试{failedStage ? ` ${failedStage}` : ''}</Button>}
+        {canCancelCurrentJob && <Button size="small" danger type="link" className="recording-retry" onClick={(e) => { e.stopPropagation(); void onCancelJob(recording.current_job_id); }}>取消排队任务</Button>}
       </div>
       <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={(e) => { e.stopPropagation(); void onDelete(); }} />
     </div>
