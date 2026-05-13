@@ -36,7 +36,16 @@ from .models import (
     UsageRecord,
 )
 from .storage import storage
-from .settings_service import AI_NODES, get_ai_config, get_app_settings, get_basic_config, public_app_settings, resolve_storage_config, save_app_settings
+from .settings_service import (
+    AI_NODES,
+    get_ai_config,
+    get_app_settings,
+    get_upload_settings,
+    public_app_settings,
+    resolve_storage_config,
+    save_app_settings,
+    save_upload_settings,
+)
 from .tasks import create_job, enqueue_job, retry_failed_job
 from .utils import fail, make_token, new_id, ok, require_auth, serialize_dt
 
@@ -230,6 +239,39 @@ def quota_exceeded(db: Session, user: User, usage_type: str, add_value: int) -> 
         if quota["monthly_qa_tokens"] and usage["month"]["qa_tokens"] + add_value > quota["monthly_qa_tokens"]:
             return True, "本月问答 Token 额度不足"
     return False, ""
+
+
+def format_upload_duration(seconds: int) -> str:
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600} 小时"
+    if seconds % 60 == 0:
+        return f"{seconds // 60} 分钟"
+    return f"{seconds} 秒"
+
+
+def audio_upload_limit_error(size: int, duration_seconds: int, upload_config: dict) -> tuple[str, str] | None:
+    max_size_mb = int(upload_config.get("audio_max_upload_size_mb") or settings.max_upload_size_mb)
+    if size > max_size_mb * 1024 * 1024:
+        return "FILE_TOO_LARGE", f"录音文件超过 {max_size_mb}MB"
+    min_seconds = int(upload_config.get("audio_min_duration_seconds") or 60)
+    max_seconds = int(upload_config.get("audio_max_duration_seconds") or settings.max_recording_duration_hours * 3600)
+    if duration_seconds <= 0:
+        return "AUDIO_DURATION_UNREADABLE", "无法读取音频时长，请转换为 mp3/wav/m4a 后重试"
+    if duration_seconds < min_seconds:
+        return "AUDIO_TOO_SHORT", f"录音时长短于 {format_upload_duration(min_seconds)}，无法上传"
+    if duration_seconds > max_seconds:
+        return "FILE_TOO_LONG", f"录音时长超过 {format_upload_duration(max_seconds)}"
+    return None
+
+
+def document_upload_limit_error(size: int, upload_config: dict, batch_total: int = 1) -> tuple[str, str] | None:
+    max_size_mb = int(upload_config.get("document_max_upload_size_mb") or settings.max_upload_size_mb)
+    if size > max_size_mb * 1024 * 1024:
+        return "FILE_TOO_LARGE", f"资料文件超过 {max_size_mb}MB"
+    max_batch_count = int(upload_config.get("document_max_batch_count") or 10)
+    if batch_total > max_batch_count:
+        return "VALIDATION_ERROR", f"一次最多上传 {max_batch_count} 个资料文件"
+    return None
 
 
 @app.on_event("startup")
@@ -512,6 +554,23 @@ async def admin_patch_default_quota(payload: dict, request: Request, db: Session
         updated_count += 1
     db.commit()
     return ok(values | {"updated_user_count": updated_count})
+
+
+@app.get("/api/admin/upload-settings")
+def admin_get_upload_settings(request: Request, db: Session = Depends(get_db)):
+    require_admin_user(request, db)
+    return ok(get_upload_settings(db))
+
+
+@app.patch("/api/admin/upload-settings")
+async def admin_patch_upload_settings(payload: dict, request: Request, db: Session = Depends(get_db)):
+    require_admin_user(request, db)
+    try:
+        save_upload_settings(db, payload)
+    except ValueError as exc:
+        return fail("VALIDATION_ERROR", str(exc))
+    db.commit()
+    return ok(get_upload_settings(db))
 
 
 @app.post("/api/admin/users")
@@ -817,15 +876,12 @@ async def create_file_upload_session(project_id: str, payload: dict, request: Re
         return fail("UNSUPPORTED_FILE_TYPE", "文件格式不支持")
     file_type = file_type_for_extension(extension)
     size = int(payload.get("file_size_bytes") or 0)
-    basic_config = get_basic_config(db)
-    max_size_mb = basic_config.get("max_upload_size_mb", settings.max_upload_size_mb)
-    if size > max_size_mb * 1024 * 1024:
-        return fail("FILE_TOO_LARGE", f"文件超过 {max_size_mb}M")
+    upload_config = get_upload_settings(db)
     duration_seconds = int(payload.get("duration_seconds") or 0)
     if file_type == "audio":
-        max_duration_hours = basic_config.get("max_recording_duration_hours", settings.max_recording_duration_hours)
-        if duration_seconds and duration_seconds > max_duration_hours * 3600:
-            return fail("FILE_TOO_LONG", f"文件时长超过 {max_duration_hours} 小时")
+        limit_error = audio_upload_limit_error(size, duration_seconds, upload_config)
+        if limit_error:
+            return fail(limit_error[0], limit_error[1])
         exceeded, reason = quota_exceeded(db, user, "asr", duration_seconds or 0)
         if exceeded:
             return fail("USER_QUOTA_EXCEEDED", reason)
@@ -833,6 +889,11 @@ async def create_file_upload_session(project_id: str, payload: dict, request: Re
             asr_speaker_metadata(payload.get("speaker_count"))
         except ValueError:
             return fail("VALIDATION_ERROR", "说话人数量仅支持 2、3、4 或智能识别")
+    else:
+        batch_total = int(payload.get("batch_total") or 1)
+        limit_error = document_upload_limit_error(size, upload_config, batch_total)
+        if limit_error:
+            return fail(limit_error[0], limit_error[1])
 
     file_id = new_id("file")
     recording_id = new_id("rec") if file_type == "audio" else None
@@ -905,12 +966,15 @@ def upload_file_content(file_id: str, request: Request, file: UploadFile = File(
     file.file.seek(0, 2)
     size = file.file.tell()
     file.file.seek(0)
-    basic_config = get_basic_config(db)
-    max_size_mb = basic_config.get("max_upload_size_mb", settings.max_upload_size_mb)
-    if size > max_size_mb * 1024 * 1024:
+    upload_config = get_upload_settings(db)
+    if project_file.file_type == "audio":
+        limit_error = audio_upload_limit_error(size, project_file.duration_seconds or 0, upload_config)
+    else:
+        limit_error = document_upload_limit_error(size, upload_config)
+    if limit_error:
         project_file.status = "failed"
         db.commit()
-        return fail("FILE_TOO_LARGE", f"文件超过 {max_size_mb}M")
+        return fail(limit_error[0], limit_error[1])
     try:
         storage.upload_fileobj(project_file.object_key, file.file, file.content_type or project_file.mime_type, storage.file_config(project_file))
     except RuntimeError as exc:
@@ -1128,14 +1192,10 @@ async def create_upload_session(project_id: str, payload: dict, db: Session = De
     if extension not in ALLOWED_EXTENSIONS:
         return fail("UNSUPPORTED_FILE_TYPE", "文件格式不支持")
     size = int(payload.get("file_size_bytes") or 0)
-    basic_config = get_basic_config(db)
-    max_size_mb = basic_config.get("max_upload_size_mb", settings.max_upload_size_mb)
-    if size > max_size_mb * 1024 * 1024:
-        return fail("FILE_TOO_LARGE", f"文件超过 {max_size_mb}M")
     duration_seconds = int(payload.get("duration_seconds") or 0)
-    max_duration_hours = basic_config.get("max_recording_duration_hours", settings.max_recording_duration_hours)
-    if duration_seconds and duration_seconds > max_duration_hours * 3600:
-        return fail("FILE_TOO_LONG", f"文件时长超过 {max_duration_hours} 小时")
+    limit_error = audio_upload_limit_error(size, duration_seconds, get_upload_settings(db))
+    if limit_error:
+        return fail(limit_error[0], limit_error[1])
     try:
         asr_speaker_metadata(payload.get("speaker_count"))
     except ValueError:
@@ -1197,12 +1257,11 @@ def upload_recording_content(recording_id: str, file: UploadFile = File(...), sp
     file.file.seek(0, 2)
     size = file.file.tell()
     file.file.seek(0)
-    basic_config = get_basic_config(db)
-    max_size_mb = basic_config.get("max_upload_size_mb", settings.max_upload_size_mb)
-    if size > max_size_mb * 1024 * 1024:
+    limit_error = audio_upload_limit_error(size, recording.duration_seconds or 0, get_upload_settings(db))
+    if limit_error:
         recording.status = "failed"
         db.commit()
-        return fail("FILE_TOO_LARGE", f"文件超过 {max_size_mb}M")
+        return fail(limit_error[0], limit_error[1])
     try:
         metadata = asr_speaker_metadata(speaker_count)
     except ValueError:
@@ -1250,13 +1309,9 @@ def upload_recording_proxy(
     size = file.file.tell()
     file.file.seek(0)
 
-    basic_config = get_basic_config(db)
-    max_size_mb = basic_config.get("max_upload_size_mb", settings.max_upload_size_mb)
-    if size > max_size_mb * 1024 * 1024:
-        return fail("FILE_TOO_LARGE", f"文件超过 {max_size_mb}M")
-    max_duration_hours = basic_config.get("max_recording_duration_hours", settings.max_recording_duration_hours)
-    if duration_seconds and duration_seconds > max_duration_hours * 3600:
-        return fail("FILE_TOO_LONG", f"文件时长超过 {max_duration_hours} 小时")
+    limit_error = audio_upload_limit_error(size, duration_seconds, get_upload_settings(db))
+    if limit_error:
+        return fail(limit_error[0], limit_error[1])
     try:
         metadata = asr_speaker_metadata(speaker_count)
     except ValueError:

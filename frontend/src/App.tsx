@@ -4,7 +4,7 @@ import { Button, Card, Checkbox, Dropdown, Form, Input, InputNumber, Layout, Lis
 import { DeleteOutlined, DownloadOutlined, DownOutlined, EditOutlined, InboxOutlined, MoreOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
 import type { MenuProps, UploadFile } from 'antd';
 import { api, clearToken, formatDuration, formatMs, getToken, setToken } from './api';
-import type { AiTestResult, AppSettings, Job, MeUsage, Project, QAMessage, QAThread, Recording, StorageTestResult, TranscriptSegment, User, UserQuota } from './types';
+import type { AiTestResult, AppSettings, Job, MeUsage, Project, QAMessage, QAThread, Recording, StorageTestResult, TranscriptSegment, UploadSettings, User, UserQuota } from './types';
 
 const { Header, Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
@@ -21,6 +21,13 @@ const SECONDS_PER_HOUR = 3600;
 const TOKENS_PER_KTOKEN = 1000;
 const AUDIO_UPLOAD_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'wma'];
 const DOCUMENT_UPLOAD_EXTENSIONS = ['pdf', 'xlsx', 'xlsm', 'xls', 'docx', 'txt', 'md', 'markdown'];
+const DEFAULT_UPLOAD_SETTINGS: UploadSettings = {
+  audio_max_upload_size_mb: 500,
+  audio_min_duration_seconds: 60,
+  audio_max_duration_seconds: 3 * SECONDS_PER_HOUR,
+  document_max_batch_count: 10,
+  document_max_upload_size_mb: 500,
+};
 
 type ProjectColumnWidths = typeof PROJECT_LAYOUT_DEFAULT;
 type ResizeDivider = 'left' | 'right';
@@ -31,6 +38,13 @@ type QuotaFormValues = {
   monthly_asr_hours: number;
   daily_qa_ktokens: number;
   monthly_qa_ktokens: number;
+};
+type UploadSettingsFormValues = {
+  audio_max_upload_size_mb: number;
+  audio_min_duration_minutes: number;
+  audio_max_duration_hours: number;
+  document_max_batch_count: number;
+  document_max_upload_size_mb: number;
 };
 type RecordingStatus =
   | 'created'
@@ -126,6 +140,31 @@ function formValuesToQuota(values: QuotaFormValues): UserQuota {
     monthly_asr_seconds: hoursToSeconds(values.monthly_asr_hours),
     daily_qa_tokens: kToTokens(values.daily_qa_ktokens),
     monthly_qa_tokens: kToTokens(values.monthly_qa_ktokens),
+  };
+}
+
+function mergeUploadSettings(settings?: Partial<UploadSettings> | null): UploadSettings {
+  return { ...DEFAULT_UPLOAD_SETTINGS, ...(settings || {}) };
+}
+
+function uploadSettingsToFormValues(settings?: Partial<UploadSettings> | null): UploadSettingsFormValues {
+  const merged = mergeUploadSettings(settings);
+  return {
+    audio_max_upload_size_mb: merged.audio_max_upload_size_mb,
+    audio_min_duration_minutes: Number((merged.audio_min_duration_seconds / 60).toFixed(2)),
+    audio_max_duration_hours: Number((merged.audio_max_duration_seconds / SECONDS_PER_HOUR).toFixed(2)),
+    document_max_batch_count: merged.document_max_batch_count,
+    document_max_upload_size_mb: merged.document_max_upload_size_mb,
+  };
+}
+
+function formValuesToUploadSettings(values: UploadSettingsFormValues): UploadSettings {
+  return {
+    audio_max_upload_size_mb: Math.round(values.audio_max_upload_size_mb || DEFAULT_UPLOAD_SETTINGS.audio_max_upload_size_mb),
+    audio_min_duration_seconds: Math.round((values.audio_min_duration_minutes || 1) * 60),
+    audio_max_duration_seconds: Math.round((values.audio_max_duration_hours || 1) * SECONDS_PER_HOUR),
+    document_max_batch_count: Math.round(values.document_max_batch_count || DEFAULT_UPLOAD_SETTINGS.document_max_batch_count),
+    document_max_upload_size_mb: Math.round(values.document_max_upload_size_mb || DEFAULT_UPLOAD_SETTINGS.document_max_upload_size_mb),
   };
 }
 
@@ -1373,12 +1412,12 @@ function AudioUploadModal({ open, projectId, onClose, onCreated, onDone }: Uploa
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
-  const [limits, setLimits] = useState<AppSettings['basic']>({ max_upload_size_mb: 500, max_recording_duration_hours: 3 });
+  const [limits, setLimits] = useState<UploadSettings>(DEFAULT_UPLOAD_SETTINGS);
   const [speakerMode, setSpeakerMode] = useState<'2' | '3' | '4' | 'auto'>('2');
 
   useEffect(() => {
     if (!open) return;
-    api<AppSettings>('/api/settings').then((data) => setLimits(data.basic)).catch(() => undefined);
+    api<AppSettings>('/api/settings').then((data) => setLimits(mergeUploadSettings(data.basic))).catch(() => undefined);
   }, [open]);
 
   const upload = async () => {
@@ -1386,23 +1425,30 @@ function AudioUploadModal({ open, projectId, onClose, onCreated, onDone }: Uploa
     if (!file) return message.warning('请选择录音文件');
     const ext = fileExtension(file.name);
     if (!AUDIO_UPLOAD_EXTENSIONS.includes(ext)) return message.error('请选择 mp3、wav、m4a、aac、flac、ogg、wma 格式的录音文件');
-    if (file.size > limits.max_upload_size_mb * 1024 * 1024) return message.error(`文件超过 ${limits.max_upload_size_mb}MB`);
+    if (file.size > limits.audio_max_upload_size_mb * 1024 * 1024) return message.error(`录音文件超过 ${limits.audio_max_upload_size_mb}MB`);
     setUploading(true);
     setUploadError('');
     try {
       const duration = await readAudioDuration(file);
-      if (duration !== null && duration < 60) {
-        Modal.warning({ title: '音频时长不足', content: '音频短于1分钟，无法上传。请上传至少1分钟的录音文件。' });
-        setUploadError('音频短于1分钟，无法上传');
+      if (duration === null) {
+        const text = '无法读取音频时长，请转换为 mp3/wav/m4a 后重试';
+        Modal.warning({ title: '无法读取音频时长', content: text });
+        setUploadError(text);
         return;
       }
-      if (duration && duration > limits.max_recording_duration_hours * 3600) {
-        message.error(`文件时长超过 ${limits.max_recording_duration_hours} 小时`);
+      if (duration < limits.audio_min_duration_seconds) {
+        const text = `音频短于 ${formatDuration(limits.audio_min_duration_seconds)}，无法上传。`;
+        Modal.warning({ title: '音频时长不足', content: text });
+        setUploadError(text);
+        return;
+      }
+      if (duration > limits.audio_max_duration_seconds) {
+        message.error(`文件时长超过 ${formatDuration(limits.audio_max_duration_seconds)}`);
         return;
       }
       const speakerCount = speakerMode === 'auto' ? 'auto' : speakerMode;
       setProgress(0);
-      const session = await api<any>(`/api/projects/${projectId}/files/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: duration ? Math.round(duration) : 0, template_type: 'customer_interview', speaker_count: speakerCount }) });
+      const session = await api<any>(`/api/projects/${projectId}/files/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: Math.round(duration), template_type: 'customer_interview', speaker_count: speakerCount }) });
       onCreated(session.file_id);
       const form = new FormData();
       form.append('file', file);
@@ -1444,7 +1490,7 @@ function AudioUploadModal({ open, projectId, onClose, onCreated, onDone }: Uploa
     >
       <p className="ant-upload-drag-icon"><InboxOutlined /></p>
       <p>拖拽录音到此处，或点击选择文件</p>
-      <p>支持 mp3、wav、m4a、aac、flac、ogg、wma；单文件最大 {limits.max_upload_size_mb}MB；音频时长 1 分钟至 {limits.max_recording_duration_hours} 小时</p>
+      <p>支持 mp3、wav、m4a、aac、flac、ogg、wma；单文件最大 {limits.audio_max_upload_size_mb}MB；音频时长 {formatDuration(limits.audio_min_duration_seconds)} 至 {formatDuration(limits.audio_max_duration_seconds)}</p>
     </Upload.Dragger>
     <div className="upload-speaker-setting">
       <Text strong>说话人数量</Text>
@@ -1467,11 +1513,11 @@ function DocumentUploadModal({ open, projectId, onClose, onCreated, onDone }: Up
   const [items, setItems] = useState<DocumentUploadState[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
-  const [limits, setLimits] = useState<AppSettings['basic']>({ max_upload_size_mb: 500, max_recording_duration_hours: 3 });
+  const [limits, setLimits] = useState<UploadSettings>(DEFAULT_UPLOAD_SETTINGS);
 
   useEffect(() => {
     if (!open) return;
-    api<AppSettings>('/api/settings').then((data) => setLimits(data.basic)).catch(() => undefined);
+    api<AppSettings>('/api/settings').then((data) => setLimits(mergeUploadSettings(data.basic))).catch(() => undefined);
   }, [open]);
 
   const reset = () => {
@@ -1487,11 +1533,11 @@ function DocumentUploadModal({ open, projectId, onClose, onCreated, onDone }: Up
   const upload = async () => {
     const selectedFiles = files.map((item) => item.originFileObj as File | undefined).filter((item): item is File => Boolean(item));
     if (!selectedFiles.length) return message.warning('请选择资料文件');
-    if (selectedFiles.length > 10) return message.error('一次最多上传10个资料文件');
+    if (selectedFiles.length > limits.document_max_batch_count) return message.error(`一次最多上传 ${limits.document_max_batch_count} 个资料文件`);
     const invalid = selectedFiles.find((file) => !DOCUMENT_UPLOAD_EXTENSIONS.includes(fileExtension(file.name)));
     if (invalid) return message.error(`文件格式不支持：${invalid.name}`);
-    const tooLarge = selectedFiles.find((file) => file.size > limits.max_upload_size_mb * 1024 * 1024);
-    if (tooLarge) return message.error(`${tooLarge.name} 超过 ${limits.max_upload_size_mb}MB`);
+    const tooLarge = selectedFiles.find((file) => file.size > limits.document_max_upload_size_mb * 1024 * 1024);
+    if (tooLarge) return message.error(`${tooLarge.name} 超过 ${limits.document_max_upload_size_mb}MB`);
 
     setUploading(true);
     setUploadError('');
@@ -1503,7 +1549,7 @@ function DocumentUploadModal({ open, projectId, onClose, onCreated, onDone }: Up
         const uid = files[index].uid;
         const ext = fileExtension(file.name);
         updateItem(uid, { status: 'uploading', progress: 0 });
-        const session = await api<any>(`/api/projects/${projectId}/files/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: 0 }) });
+        const session = await api<any>(`/api/projects/${projectId}/files/upload-session`, { method: 'POST', body: JSON.stringify({ file_name: file.name, file_size_bytes: file.size, mime_type: file.type || 'application/octet-stream', extension: ext, duration_seconds: 0, batch_total: selectedFiles.length }) });
         if (!firstFileId) firstFileId = session.file_id;
         const form = new FormData();
         form.append('file', file);
@@ -1529,14 +1575,14 @@ function DocumentUploadModal({ open, projectId, onClose, onCreated, onDone }: Up
       multiple
       beforeUpload={() => false}
       accept={DOCUMENT_UPLOAD_EXTENSIONS.map((item) => `.${item}`).join(',')}
-      maxCount={10}
+      maxCount={limits.document_max_batch_count}
       fileList={files}
-      onChange={(info) => { setFiles(info.fileList.slice(0, 10)); setUploadError(''); }}
+      onChange={(info) => { setFiles(info.fileList.slice(0, limits.document_max_batch_count)); setUploadError(''); }}
       disabled={uploading}
     >
       <p className="ant-upload-drag-icon"><InboxOutlined /></p>
       <p>拖拽资料文件到此处，或点击选择文件</p>
-      <p>支持 PDF、Excel、Word docx、TXT/MD；一次最多 10 个，单文件最大 {limits.max_upload_size_mb}MB</p>
+      <p>支持 PDF、Excel、Word docx、TXT/MD；一次最多 {limits.document_max_batch_count} 个，单文件最大 {limits.document_max_upload_size_mb}MB</p>
     </Upload.Dragger>
     {items.length > 0 && <List
       className="document-upload-list"
@@ -1836,14 +1882,17 @@ function AdminPage({ onBack }: { onBack: () => void }) {
   const [includeDeleted, setIncludeDeleted] = useState(false);
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [savingDefaultQuota, setSavingDefaultQuota] = useState(false);
+  const [savingUploadSettings, setSavingUploadSettings] = useState(false);
   const [form] = Form.useForm();
   const [quotaForm] = Form.useForm<QuotaFormValues>();
   const [defaultQuotaForm] = Form.useForm<QuotaFormValues>();
+  const [uploadSettingsForm] = Form.useForm<UploadSettingsFormValues>();
   const load = useCallback(async () => {
-    const [meData, userData, defaultQuotaData, projectData, userUsageData, jobData] = await Promise.all([
+    const [meData, userData, defaultQuotaData, uploadSettingsData, projectData, userUsageData, jobData] = await Promise.all([
       api<User>('/api/auth/me'),
       api<{ items: User[] }>(`/api/admin/users?include_deleted=${includeDeleted ? 'true' : 'false'}`),
       api<UserQuota>('/api/admin/default-quota'),
+      api<UploadSettings>('/api/admin/upload-settings'),
       api<{ items: any[] }>('/api/admin/usage/projects'),
       api<{ items: any[] }>('/api/admin/usage/users'),
       api<{ items: Job[] }>('/api/jobs/recent?page_size=50'),
@@ -1851,10 +1900,11 @@ function AdminPage({ onBack }: { onBack: () => void }) {
     setMe(meData);
     setUsers(userData.items);
     defaultQuotaForm.setFieldsValue(quotaToFormValues(defaultQuotaData));
+    uploadSettingsForm.setFieldsValue(uploadSettingsToFormValues(uploadSettingsData));
     setProjectUsage(projectData.items);
     setUserUsage(userUsageData.items);
     setJobs(jobData.items);
-  }, [defaultQuotaForm, includeDeleted]);
+  }, [defaultQuotaForm, includeDeleted, uploadSettingsForm]);
   useEffect(() => { void load().catch((err) => message.error((err as Error).message)); }, [load]);
   useEffect(() => setSelectedUserIds([]), [includeDeleted]);
   const createUser = async () => {
@@ -1893,6 +1943,22 @@ function AdminPage({ onBack }: { onBack: () => void }) {
       void load();
     } finally {
       setSavingDefaultQuota(false);
+    }
+  };
+  const saveUploadSettings = async () => {
+    const values = await uploadSettingsForm.validateFields();
+    const payload = formValuesToUploadSettings(values);
+    if (payload.audio_min_duration_seconds >= payload.audio_max_duration_seconds) {
+      message.warning('录音最小时长必须小于最大时长');
+      return;
+    }
+    setSavingUploadSettings(true);
+    try {
+      const data = await api<UploadSettings>('/api/admin/upload-settings', { method: 'PATCH', body: JSON.stringify(payload) });
+      uploadSettingsForm.setFieldsValue(uploadSettingsToFormValues(data));
+      message.success('上传文件设置已保存');
+    } finally {
+      setSavingUploadSettings(false);
     }
   };
   const deleteUser = (user: User) => {
@@ -1964,6 +2030,38 @@ function AdminPage({ onBack }: { onBack: () => void }) {
             />
           </Card>
         </Space> },
+        { key: 'uploadSettings', label: '上传文件设置', children: <Form form={uploadSettingsForm} layout="vertical">
+          <Space direction="vertical" style={{ width: '100%' }}>
+            <Card title="录音文件限制" extra={<Text type="secondary">控制新上传录音的大小和时长范围</Text>}>
+              <div className="basic-settings-grid">
+                <Form.Item name="audio_max_upload_size_mb" label="单个录音文件最大大小" rules={[{ required: true, message: '请输入录音文件大小上限' }]}>
+                  <InputNumber min={1} max={5000} addonAfter="MB" style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item name="audio_min_duration_minutes" label="录音最小时长" rules={[{ required: true, message: '请输入录音最小时长' }]}>
+                  <InputNumber min={0.1} max={1440} precision={2} addonAfter="分钟" style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item name="audio_max_duration_hours" label="录音最大时长" rules={[{ required: true, message: '请输入录音最大时长' }]}>
+                  <InputNumber min={0.1} max={24} precision={2} addonAfter="小时" style={{ width: '100%' }} />
+                </Form.Item>
+              </div>
+            </Card>
+            <Card title="资料文件限制" extra={<Text type="secondary">控制每次上传的资料数量和单文件大小</Text>}>
+              <div className="basic-settings-grid">
+                <Form.Item name="document_max_batch_count" label="资料文件单次最大个数" rules={[{ required: true, message: '请输入单次最大个数' }]}>
+                  <InputNumber min={1} max={100} precision={0} addonAfter="个" style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item name="document_max_upload_size_mb" label="单个资料文件最大大小" rules={[{ required: true, message: '请输入资料文件大小上限' }]}>
+                  <InputNumber min={1} max={5000} addonAfter="MB" style={{ width: '100%' }} />
+                </Form.Item>
+              </div>
+            </Card>
+            <Paragraph type="secondary">设置仅影响新上传文件，不影响已上传文件和已进入处理队列的任务。</Paragraph>
+            <Space>
+              <Button type="primary" loading={savingUploadSettings} onClick={saveUploadSettings}>保存设置</Button>
+              <Button onClick={() => void load()}>重新加载</Button>
+            </Space>
+          </Space>
+        </Form> },
         { key: 'projectUsage', label: '项目用量报表', children: <Card><Table rowKey="project_id" dataSource={projectUsage} pagination={{ pageSize: 10 }} columns={[
           { title: '项目', dataIndex: 'project_name' },
           { title: '文件数', dataIndex: 'file_count' },
@@ -2057,6 +2155,7 @@ function SettingsPage({ onBack }: { onBack: () => void }) {
     try {
       const payload = {
         basic: {
+          ...(settings?.basic || {}),
           max_upload_size_mb: Number(values.basic?.max_upload_size_mb || 500),
           max_recording_duration_hours: Number(values.basic?.max_recording_duration_hours || 3)
         },

@@ -11,6 +11,15 @@ from .models import SystemSetting
 SETTINGS_KEY = "app"
 AI_NODES = ("asr", "clean", "summary", "qa")
 STORAGE_PROVIDERS = ("local", "railway_bucket", "s3_compatible")
+UPLOAD_SETTING_FIELDS = (
+    "audio_max_upload_size_mb",
+    "audio_min_duration_seconds",
+    "audio_max_duration_seconds",
+    "document_max_batch_count",
+    "document_max_upload_size_mb",
+)
+DEFAULT_AUDIO_MIN_DURATION_SECONDS = 60
+DEFAULT_DOCUMENT_MAX_BATCH_COUNT = 10
 
 
 def _positive_int(value: Any, fallback: int, minimum: int = 1) -> int:
@@ -24,10 +33,17 @@ def _positive_int(value: Any, fallback: int, minimum: int = 1) -> int:
 def default_app_settings() -> dict:
     env = get_settings()
     env_storage = _env_bucket_config()
+    max_upload_size_mb = env.max_upload_size_mb
+    max_recording_duration_hours = env.max_recording_duration_hours
     return {
         "basic": {
-            "max_upload_size_mb": env.max_upload_size_mb,
-            "max_recording_duration_hours": env.max_recording_duration_hours,
+            "max_upload_size_mb": max_upload_size_mb,
+            "max_recording_duration_hours": max_recording_duration_hours,
+            "audio_max_upload_size_mb": max_upload_size_mb,
+            "audio_min_duration_seconds": DEFAULT_AUDIO_MIN_DURATION_SECONDS,
+            "audio_max_duration_seconds": max_recording_duration_hours * 3600,
+            "document_max_batch_count": DEFAULT_DOCUMENT_MAX_BATCH_COUNT,
+            "document_max_upload_size_mb": max_upload_size_mb,
         },
         "ai": {
             "asr": {"model": env.asr_model, "url": env.asr_api_url, "api_key": env.asr_api_key},
@@ -60,6 +76,36 @@ def _normalize(payload: dict | None, base: dict) -> dict:
     merged["basic"]["max_recording_duration_hours"] = _positive_int(
         basic.get("max_recording_duration_hours", basic.get("max_duration_hours")),
         merged["basic"]["max_recording_duration_hours"],
+    )
+    merged["basic"]["audio_max_upload_size_mb"] = _positive_int(
+        basic.get("audio_max_upload_size_mb"),
+        _positive_int(
+            basic.get("max_upload_size_mb", basic.get("max_size_mb")),
+            merged["basic"].get("audio_max_upload_size_mb", merged["basic"]["max_upload_size_mb"]),
+        ),
+    )
+    merged["basic"]["audio_min_duration_seconds"] = _positive_int(
+        basic.get("audio_min_duration_seconds"),
+        merged["basic"].get("audio_min_duration_seconds", DEFAULT_AUDIO_MIN_DURATION_SECONDS),
+    )
+    merged["basic"]["audio_max_duration_seconds"] = _positive_int(
+        basic.get("audio_max_duration_seconds"),
+        _positive_int(
+            basic.get("max_recording_duration_hours", basic.get("max_duration_hours")),
+            merged["basic"].get("max_recording_duration_hours", 1),
+        )
+        * 3600,
+    )
+    merged["basic"]["document_max_batch_count"] = _positive_int(
+        basic.get("document_max_batch_count"),
+        merged["basic"].get("document_max_batch_count", DEFAULT_DOCUMENT_MAX_BATCH_COUNT),
+    )
+    merged["basic"]["document_max_upload_size_mb"] = _positive_int(
+        basic.get("document_max_upload_size_mb"),
+        _positive_int(
+            basic.get("max_upload_size_mb", basic.get("max_size_mb")),
+            merged["basic"].get("document_max_upload_size_mb", merged["basic"]["max_upload_size_mb"]),
+        ),
     )
 
     ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
@@ -190,6 +236,38 @@ def get_ai_config(node: str) -> dict:
 
 def get_basic_config(session: Session | None = None) -> dict:
     return get_app_settings(session).get("basic", {})
+
+
+def upload_settings_from_basic(basic: dict | None) -> dict:
+    env = get_settings()
+    basic = basic or {}
+    fallback_size_mb = _positive_int(basic.get("max_upload_size_mb"), env.max_upload_size_mb)
+    fallback_duration_hours = _positive_int(basic.get("max_recording_duration_hours"), env.max_recording_duration_hours)
+    return {
+        "audio_max_upload_size_mb": _positive_int(basic.get("audio_max_upload_size_mb"), fallback_size_mb),
+        "audio_min_duration_seconds": _positive_int(basic.get("audio_min_duration_seconds"), DEFAULT_AUDIO_MIN_DURATION_SECONDS),
+        "audio_max_duration_seconds": _positive_int(basic.get("audio_max_duration_seconds"), fallback_duration_hours * 3600),
+        "document_max_batch_count": _positive_int(basic.get("document_max_batch_count"), DEFAULT_DOCUMENT_MAX_BATCH_COUNT),
+        "document_max_upload_size_mb": _positive_int(basic.get("document_max_upload_size_mb"), fallback_size_mb),
+    }
+
+
+def get_upload_settings(session: Session | None = None) -> dict:
+    return upload_settings_from_basic(get_basic_config(session))
+
+
+def save_upload_settings(session: Session, payload: dict) -> dict:
+    current = get_app_settings(session)
+    basic = dict(current.get("basic") or {})
+    incoming = payload or {}
+    for field in UPLOAD_SETTING_FIELDS:
+        if field in incoming:
+            basic[field] = incoming[field]
+    normalized = upload_settings_from_basic(basic)
+    if normalized["audio_min_duration_seconds"] >= normalized["audio_max_duration_seconds"]:
+        raise ValueError("录音最小时长必须小于最大时长")
+    basic.update(normalized)
+    return save_app_settings(session, {"basic": basic})["basic"]
 
 
 def get_storage_config(session: Session | None = None) -> dict:

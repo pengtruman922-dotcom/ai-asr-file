@@ -145,8 +145,16 @@ export type StorageSettings = {
   secret_key_configured: boolean;
 };
 
+export type UploadSettings = {
+  audio_max_upload_size_mb: number;
+  audio_min_duration_seconds: number;
+  audio_max_duration_seconds: number;
+  document_max_batch_count: number;
+  document_max_upload_size_mb: number;
+};
+
 export type AppSettings = {
-  basic: {
+  basic: UploadSettings & {
     max_upload_size_mb: number;
     max_recording_duration_hours: number;
   };
