@@ -1623,6 +1623,30 @@ def get_qa_thread(thread_id: str, request: Request, db: Session = Depends(get_db
     return ok(thread_payload(thread, db, include_messages=True))
 
 
+@app.delete("/api/qa-threads/{thread_id}")
+def delete_qa_thread(thread_id: str, request: Request, db: Session = Depends(get_db)):
+    thread = db.get(QAThread, thread_id)
+    if not thread:
+        return fail("QA_THREAD_NOT_FOUND", "对话不存在", status_code=404)
+    user = current_user(request, db)
+    try:
+        ensure_project_access(thread.project_id, user, db)
+    except HTTPException as exc:
+        return fail(str(exc.detail), "对话不存在或无权访问", status_code=exc.status_code)
+    if user.role != "admin" and thread.user_id not in {None, user.id}:
+        return fail("QA_THREAD_FORBIDDEN", "无权删除该对话", status_code=403)
+    pending = (
+        db.query(QAMessage)
+        .filter(QAMessage.thread_id == thread.id, QAMessage.role == "assistant", QAMessage.status.in_(["queued", "running"]))
+        .first()
+    )
+    if pending:
+        return fail("QA_IN_PROGRESS", "当前对话正在生成回答，请等待完成后再删除")
+    db.delete(thread)
+    db.commit()
+    return ok({"deleted": True, "thread_id": thread_id})
+
+
 @app.post("/api/qa-threads/{thread_id}/messages")
 async def create_qa_message(thread_id: str, payload: dict, request: Request, db: Session = Depends(get_db)):
     thread = db.get(QAThread, thread_id)

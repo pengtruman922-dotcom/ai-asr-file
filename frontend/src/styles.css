@@ -501,6 +501,19 @@ body { background: #f5f6f8; color: #1d2433; font-family: -apple-system, BlinkMac
 
 /* ── QA ── */
 .qa-card { width: 100%; background: #fbfcff; }
+.qa-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid #dce8fc; border-radius: 14px; background: linear-gradient(135deg, #f6f9ff 0%, #eef5ff 100%); }
+.qa-topbar-sub { margin-top: 2px; color: #6b778c; font-size: 12px; }
+.qa-new-thread-btn { flex-shrink: 0; min-width: 112px; border: none; box-shadow: 0 8px 18px rgba(59, 111, 212, 0.22); font-weight: 700; }
+.qa-thread-list { display: grid; gap: 6px; max-height: 150px; overflow-y: auto; padding: 2px; }
+.qa-thread-item { display: grid; grid-template-columns: 1fr 30px; align-items: center; gap: 8px; padding: 8px 8px 8px 10px; border: 1px solid #e8ecf2; border-radius: 11px; background: #fff; cursor: pointer; transition: background 140ms, border-color 140ms, box-shadow 140ms; }
+.qa-thread-item:hover { background: #f7faff; border-color: #cfe0fb; }
+.qa-thread-item.active { background: #eef5ff; border-color: #9fc2f5; box-shadow: inset 3px 0 0 #3b6fd4; }
+.qa-thread-meta { min-width: 0; display: grid; gap: 1px; }
+.qa-thread-title { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.qa-thread-time { font-size: 12px; }
+.qa-thread-empty { padding: 12px; border: 1px dashed #dce2ed; border-radius: 11px; color: #8492a6; background: #fbfcff; text-align: center; }
+.qa-selection-summary { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 10px; border-radius: 10px; background: #f8f9fc; border: 1px solid #e8ecf2; }
+.qa-selection-summary .ant-typography { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .qa-messages { display: grid; gap: 10px; max-height: 52vh; overflow-y: auto; padding-right: 4px; }
 .qa-user { background: #f8f9fc; border-color: #e8ecf2 !important; }
 .qa-assistant { background: #f0f5ff; border-color: #dce8fc !important; }

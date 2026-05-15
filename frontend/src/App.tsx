@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, Key, PointerEvent as ReactPointerEvent } from 'react';
 import { Button, Card, Checkbox, Dropdown, Form, Input, InputNumber, Layout, List, Modal, Progress, Radio, Select, Space, Table, Tabs, Tag, Typography, Upload, message } from 'antd';
-import { DeleteOutlined, DownloadOutlined, DownOutlined, EditOutlined, InboxOutlined, MoreOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
+import { CloseOutlined, DeleteOutlined, DownloadOutlined, DownOutlined, EditOutlined, InboxOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
 import type { MenuProps, UploadFile } from 'antd';
 import { api, clearToken, formatDuration, formatMs, getToken, setToken } from './api';
 import type { AiTestResult, AppSettings, Job, MeUsage, Project, QAMessage, QAThread, Recording, StorageTestResult, TranscriptSegment, UploadSettings, User, UserQuota } from './types';
@@ -31,6 +31,7 @@ const DEFAULT_UPLOAD_SETTINGS: UploadSettings = {
 
 type ProjectColumnWidths = typeof PROJECT_LAYOUT_DEFAULT;
 type ResizeDivider = 'left' | 'right';
+type QaSelectionMode = 'current' | 'manual';
 type SegmentSaveOptions = { replaceSameSpeaker?: boolean };
 type SegmentUpdateResult = { summary_stale?: boolean; updated_count?: number };
 type QuotaFormValues = {
@@ -261,8 +262,18 @@ function isRecordingReadyForQa(status?: string) {
   return normalizeRecordingStatus(status) === 'completed';
 }
 
-function defaultQaSelection(recordings: Recording[]) {
-  return recordings.filter((item) => isRecordingReadyForQa(item.status) && item.reference_status !== 'source_unshared' && item.reference_status !== 'source_deleted' && item.reference_status !== 'file_deleted').slice(0, 10).map(fileKey);
+function isReferenceUnavailable(item?: Recording | null) {
+  return Boolean(item && ['source_unshared', 'source_deleted', 'file_deleted'].includes(item.reference_status || ''));
+}
+
+function isRecordingAvailableForQa(item?: Recording | null) {
+  return Boolean(item && isRecordingReadyForQa(item.status) && !isReferenceUnavailable(item));
+}
+
+function currentQaSelection(recordings: Recording[], selectedId: string | null) {
+  if (!selectedId) return [];
+  const selected = recordings.find((item) => fileKey(item) === selectedId);
+  return isRecordingAvailableForQa(selected) ? [selectedId] : [];
 }
 
 function fileKey(item: Recording) {
@@ -698,6 +709,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<string[]>([]);
+  const [qaSelectionMode, setQaSelectionMode] = useState<QaSelectionMode>('current');
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
   const [extractedText, setExtractedText] = useState('');
   const [fileDetail, setFileDetail] = useState<Recording | null>(null);
@@ -720,15 +732,18 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const [clockNow, setClockNow] = useState(() => Date.now());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
-  const selectionTouchedRef = useRef(false);
+  const qaSelectionModeRef = useRef<QaSelectionMode>('current');
   const restoredThreadSelectionRef = useRef<string | null>(null);
-  const qaSelectionWarnedRef = useRef(false);
 
   const selectedRecording = recordings.find((item) => fileKey(item) === selectedId) || null;
   const selectedRecordingId = selectedRecording?.recording_id || null;
   const selectedRecordingPlayable = isAudioFile(selectedRecording) && isRecordingPlayable(selectedRecording?.status);
   const summaryJobInProgress = selectedRecording?.current_job_type === 'summary_generation' && ['queued', 'running'].includes(selectedRecording.current_job_status || '');
   const pendingQaAnswer = messages.some((item) => item.role === 'assistant' && ['queued', 'running'].includes(item.status));
+
+  useEffect(() => {
+    qaSelectionModeRef.current = qaSelectionMode;
+  }, [qaSelectionMode]);
 
   const loadProject = useCallback(async () => {
     const [p, r] = await Promise.all([
@@ -737,15 +752,16 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     ]);
     setProject(p);
     setRecordings(r.items);
-    if (!selectedId && r.items.length) setSelectedId(fileKey(r.items[0]));
-    const completedIds = new Set(r.items.filter((item) => isRecordingReadyForQa(item.status)).map(fileKey));
-    const defaultIds = defaultQaSelection(r.items);
-    if (!selectionTouchedRef.current) {
-      setCheckedIds((prev) => isSameIdSet(prev, defaultIds) ? prev : defaultIds);
+    const nextSelectedId = selectedId || (r.items[0] ? fileKey(r.items[0]) : null);
+    if (!selectedId && nextSelectedId) setSelectedId(nextSelectedId);
+    const completedIds = new Set(r.items.filter(isRecordingAvailableForQa).map(fileKey));
+    if (qaSelectionMode === 'current') {
+      const currentIds = currentQaSelection(r.items, nextSelectedId);
+      setCheckedIds((prev) => isSameIdSet(prev, currentIds) ? prev : currentIds);
     } else {
       setCheckedIds((prev) => prev.filter((id) => completedIds.has(id)).slice(0, 10));
     }
-  }, [projectId, selectedId]);
+  }, [projectId, qaSelectionMode, selectedId]);
 
   const loadSelected = useCallback(async () => {
     if (!selectedId || !selectedRecording) return;
@@ -782,12 +798,15 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
       const lastMessage = [...nextMessages].reverse().find((item) => item.selected_file_ids?.length || item.selected_recording_ids?.length);
       const lastSelection = lastMessage?.selected_file_ids?.length ? lastMessage.selected_file_ids : (lastMessage?.selected_recording_ids || []);
       if (lastSelection.length) {
-        selectionTouchedRef.current = true;
+        setQaSelectionMode('manual');
         setCheckedIds(lastSelection.slice(0, 10));
+      } else {
+        setQaSelectionMode('current');
+        setCheckedIds(currentQaSelection(recordings, selectedId));
       }
       restoredThreadSelectionRef.current = currentThreadId;
     }
-  }, [currentThreadId]);
+  }, [currentThreadId, recordings, selectedId]);
 
   useEffect(() => { void loadProject(); }, [loadProject]);
   useEffect(() => { void loadSelected(); }, [loadSelected]);
@@ -946,8 +965,8 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     const data = await api<QAThread>(`/api/projects/${projectId}/qa-threads`, { method: 'POST', body: JSON.stringify({}) });
     setCurrentThreadId(data.thread_id);
     restoredThreadSelectionRef.current = data.thread_id;
-    selectionTouchedRef.current = false;
-    setCheckedIds(defaultQaSelection(recordings));
+    setQaSelectionMode('current');
+    setCheckedIds(currentQaSelection(recordings, selectedId));
     setMessages([]);
     void loadThreads();
   };
@@ -957,27 +976,15 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     if (!question) return message.warning('请输入问题');
     if (pendingQaAnswer) return message.warning('AI 正在回答，完成后可继续提问');
     if (qaSubmitting) return;
-    const readyIds = new Set(recordings.filter((item) => isRecordingReadyForQa(item.status)).map(fileKey));
+    const readyIds = new Set(recordings.filter(isRecordingAvailableForQa).map(fileKey));
     const qaFileIds = checkedIds.filter((id) => readyIds.has(id)).slice(0, 10);
     if (!qaFileIds.length) return message.warning('请先勾选已处理完成的文件');
-    const completedCount = readyIds.size;
-    const defaultFirstTen = defaultQaSelection(recordings);
-    const isUsingDefaultFirstTen = completedCount > 10 && isSameIdSet(qaFileIds, defaultFirstTen);
-    if (!qaSelectionWarnedRef.current && isUsingDefaultFirstTen) {
-      Modal.confirm({
-        title: '确认参考文件范围',
-        content: `当前项目共有 ${completedCount} 份已完成录音，本次仅使用默认勾选的前 10 份作为参考材料。为了提高回答准确性，建议你根据问题精准勾选相关录音。是否继续发送？`,
-        okText: '继续发送',
-        cancelText: '我去调整',
-        onOk: () => { qaSelectionWarnedRef.current = true; void ask(); },
-      });
-      return;
-    }
     let threadId = currentThreadId;
     if (!threadId) {
       const thread = await api<QAThread>(`/api/projects/${projectId}/qa-threads`, { method: 'POST', body: JSON.stringify({}) });
       threadId = thread.thread_id;
       setCurrentThreadId(threadId);
+      restoredThreadSelectionRef.current = threadId;
     }
     const now = new Date().toISOString();
     const tmpUserId = `tmp_user_${Date.now()}`;
@@ -1033,6 +1040,39 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
       setQaSubmitting(false);
       setQaStreaming(false);
     }
+  };
+
+  const selectRecording = (id: string) => {
+    setSelectedId(id);
+    if (qaSelectionModeRef.current === 'current') {
+      setCheckedIds(currentQaSelection(recordings, id));
+    }
+  };
+
+  const deleteThread = (thread: QAThread) => {
+    Modal.confirm({
+      title: '删除该对话？',
+      content: '删除后，该对话中的问答记录将无法恢复。',
+      okText: '删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        await api(`/api/qa-threads/${thread.thread_id}`, { method: 'DELETE' });
+        message.success('对话已删除');
+        const remaining = threads.filter((item) => item.thread_id !== thread.thread_id);
+        if (currentThreadId === thread.thread_id) {
+          const nextThreadId = remaining[0]?.thread_id || null;
+          setCurrentThreadId(nextThreadId);
+          if (!nextThreadId) {
+            restoredThreadSelectionRef.current = null;
+            setMessages([]);
+            setQaSelectionMode('current');
+            setCheckedIds(currentQaSelection(recordings, selectedId));
+          }
+        }
+        void loadThreads();
+      },
+    });
   };
 
   const deleteRecording = async (id: string) => {
@@ -1099,12 +1139,12 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   };
 
   const toggleRecordingCheck = (id: string, checked: boolean) => {
-    selectionTouchedRef.current = true;
+    setQaSelectionMode('manual');
     setCheckedIds((prev) => {
       if (!checked) return prev.filter((item) => item !== id);
       if (prev.includes(id)) return prev;
       const recording = recordings.find((item) => fileKey(item) === id);
-      if (!isRecordingReadyForQa(recording?.status)) {
+      if (!isRecordingAvailableForQa(recording)) {
         message.warning('只有处理完成的文件可以用于问答');
         return prev;
       }
@@ -1191,9 +1231,9 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
               recording={rec}
               active={fileKey(rec) === selectedId}
               checked={checkedIds.includes(fileKey(rec))}
-              checkDisabled={!isRecordingReadyForQa(rec.status) || ['source_unshared', 'source_deleted', 'file_deleted'].includes(rec.reference_status || '')}
+              checkDisabled={!isRecordingAvailableForQa(rec)}
               clockNow={clockNow}
-              onSelect={() => setSelectedId(fileKey(rec))}
+              onSelect={() => selectRecording(fileKey(rec))}
               onCheck={(checked) => toggleRecordingCheck(fileKey(rec), checked)}
               onRename={(name) => renameRecording(fileKey(rec), name)}
               onRetry={(jobId) => retryFailedRecording(jobId)}
@@ -1232,7 +1272,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
         <aside className="right-panel panel-scroll">
           <Tabs defaultActiveKey="summary" items={[
             { key: 'summary', label: isAudioFile(selectedRecording) ? '纪要' : '文件信息', children: isAudioFile(selectedRecording) ? <SummaryView summary={summary} stale={selectedRecording?.summary_stale || summary?.stale} regenerating={summaryJobInProgress || summarySubmitting} onExport={() => exportMd('summary')} onRegenerate={regenerateSummary} /> : <FileInfoView file={fileDetail || selectedRecording} /> },
-            { key: 'qa', label: '问答', children: <QAView checked={checkedIds} recordings={recordings} threads={threads} currentThreadId={currentThreadId} setCurrentThreadId={setCurrentThreadId} messages={messages} question={qaQuestion} setQuestion={setQaQuestion} onAsk={ask} onNewThread={createThread} submitting={qaSubmitting} waitingForAnswer={pendingQaAnswer} /> }
+            { key: 'qa', label: '问答', children: <QAView checked={checkedIds} selectionMode={qaSelectionMode} recordings={recordings} threads={threads} currentThreadId={currentThreadId} setCurrentThreadId={setCurrentThreadId} messages={messages} question={qaQuestion} setQuestion={setQaQuestion} onAsk={ask} onNewThread={createThread} onDeleteThread={deleteThread} submitting={qaSubmitting} waitingForAnswer={pendingQaAnswer} /> }
           ]} />
         </aside>
       </div>
@@ -1405,23 +1445,66 @@ function MarkdownLite({ markdown }: { markdown: string }) {
   })}</div>;
 }
 
-function QAView({ checked, recordings, threads, currentThreadId, setCurrentThreadId, messages, question, setQuestion, onAsk, onNewThread, submitting, waitingForAnswer }: { checked: string[]; recordings: Recording[]; threads: QAThread[]; currentThreadId: string | null; setCurrentThreadId: (id: string) => void; messages: QAMessage[]; question: string; setQuestion: (v: string) => void; onAsk: () => void; onNewThread: () => void; submitting: boolean; waitingForAnswer: boolean }) {
-  const selectedNames = recordings.filter((r) => checked.includes(fileKey(r))).map((r) => r.file_name);
-  const readyCount = recordings.filter((r) => isRecordingReadyForQa(r.status)).length;
+function QAView({ checked, selectionMode, recordings, threads, currentThreadId, setCurrentThreadId, messages, question, setQuestion, onAsk, onNewThread, onDeleteThread, submitting, waitingForAnswer }: { checked: string[]; selectionMode: QaSelectionMode; recordings: Recording[]; threads: QAThread[]; currentThreadId: string | null; setCurrentThreadId: (id: string) => void; messages: QAMessage[]; question: string; setQuestion: (v: string) => void; onAsk: () => void; onNewThread: () => void; onDeleteThread: (thread: QAThread) => void; submitting: boolean; waitingForAnswer: boolean }) {
+  const { selectedNames, readyCount } = useMemo(() => {
+    const checkedSet = new Set(checked);
+    return {
+      selectedNames: recordings.filter((r) => checkedSet.has(fileKey(r))).map((r) => r.file_name),
+      readyCount: recordings.filter(isRecordingAvailableForQa).length,
+    };
+  }, [checked, recordings]);
+  const selectionLabel = selectionMode === 'current' ? '当前文件' : checked.length > 1 ? '多文件参考' : '手动选择';
+  const selectionText = selectedNames.length
+    ? `${selectedNames.slice(0, 3).join(' / ')}${selectedNames.length > 3 ? ` 等 ${selectedNames.length} 份` : ''}`
+    : readyCount ? '请选择左侧已处理完成的文件作为参考材料' : '暂无处理完成的文件可用于问答';
   return <Space direction="vertical" style={{ width: '100%' }}>
-    <Space.Compact style={{ width: '100%' }}>
-      <Button onClick={onNewThread}>新建对话</Button>
-      <Select
-        value={currentThreadId || undefined}
-        placeholder="历史对话"
-        suffixIcon={<DownOutlined />}
-        style={{ flex: 1 }}
-        onChange={setCurrentThreadId}
-        options={threads.map((thread) => ({ value: thread.thread_id, label: `${thread.title || '新对话'} ${formatMonthDayTime(thread.last_message_at || thread.updated_at)}` }))}
-      />
-    </Space.Compact>
-    <Tag color="blue">当前勾选：{checked.length} 份</Tag>
-    <Paragraph type="secondary">{selectedNames.length ? selectedNames.join(' / ') : readyCount ? '请在左侧勾选已处理完成的参考文件' : '暂无处理完成的文件可用于问答'}</Paragraph>
+    <div className="qa-topbar">
+      <div>
+        <Text strong>问答对话</Text>
+        <div className="qa-topbar-sub">新对话默认使用当前文件作为参考材料</div>
+      </div>
+      <Button type="primary" icon={<PlusOutlined />} onClick={onNewThread} className="qa-new-thread-btn">新建对话</Button>
+    </div>
+    <div className="qa-thread-list">
+      {threads.length ? threads.map((thread) => {
+        const active = thread.thread_id === currentThreadId;
+        return (
+          <div
+            key={thread.thread_id}
+            role="button"
+            tabIndex={0}
+            className={active ? 'qa-thread-item active' : 'qa-thread-item'}
+            onClick={() => setCurrentThreadId(thread.thread_id)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                setCurrentThreadId(thread.thread_id);
+              }
+            }}
+          >
+            <div className="qa-thread-meta">
+              <Text strong className="qa-thread-title">{thread.title || '新对话'}</Text>
+              <Text type="secondary" className="qa-thread-time">{formatMonthDayTime(thread.last_message_at || thread.updated_at)}</Text>
+            </div>
+            <Button
+              size="small"
+              type="text"
+              danger
+              icon={<CloseOutlined />}
+              aria-label="删除对话"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDeleteThread(thread);
+              }}
+            />
+          </div>
+        );
+      }) : <div className="qa-thread-empty">暂无历史对话，点击“新建对话”开始。</div>}
+    </div>
+    <div className="qa-selection-summary">
+      <Tag color={selectionMode === 'current' ? 'blue' : 'geekblue'}>{selectionLabel}：{checked.length} 份</Tag>
+      <Text type="secondary" title={selectedNames.join(' / ')}>{selectionText}</Text>
+    </div>
     <div className="qa-messages">
       {messages.map((item) => <Card key={item.message_id} size="small" className={item.role === 'user' ? 'qa-user' : 'qa-assistant'}>
         <Text strong>{item.role === 'user' ? '用户' : 'AI'}</Text>
