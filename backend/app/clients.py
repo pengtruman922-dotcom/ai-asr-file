@@ -427,7 +427,8 @@ class LLMClient:
         batch_count = len(batches)
         if batch_count == 0:
             return []
-        max_workers = max(1, min(self.settings.llm_clean_batch_concurrency, batch_count))
+        per_job_concurrency = self._clean_per_job_concurrency()
+        max_workers = max(1, min(per_job_concurrency, batch_count))
         self._emit_clean_event(
             on_event,
             "batch_plan",
@@ -435,6 +436,7 @@ class LLMClient:
                 "segment_count": len(raw_segments),
                 "batch_count": batch_count,
                 "max_workers": max_workers,
+                "global_concurrency": self._clean_global_concurrency(),
                 "max_segments": self.settings.llm_clean_batch_max_segments,
                 "max_chars": self.settings.llm_clean_batch_max_chars,
             },
@@ -480,41 +482,88 @@ class LLMClient:
         return batches
 
     def _clean_segment_batch(self, config: dict, api_key: str, raw_segments: list[dict], batch_index: int, batch_count: int) -> list[dict]:
-        content = self._chat_json(
-            config.get("url", self.settings.llm_clean_base_url),
-            api_key,
-            config.get("model", self.settings.llm_clean_model),
-            "你是咨询访谈转写清洁助手。请修正明显错别字、标点和断句，保留原意、说话人、时间戳，不要扩写、合并或删除段落。只返回 JSON。",
-            json.dumps(
-                {
-                    "task": "clean_transcript_segments",
-                    "batch": {"index": batch_index, "total": batch_count},
-                    "rules": [
-                        "返回 segments 数组，数量和输入 segments 保持一致",
-                        "每个输出段落必须保留对应 raw_segment_id、speaker、start_time_ms、end_time_ms",
-                        "clean_text 只做可读性清洁，不要总结、扩写或改变原意",
-                    ],
-                    "output_schema": {
-                        "segments": [
-                            {
-                                "raw_segment_id": "原始段落 id",
-                                "speaker": "说话人",
-                                "start_time_ms": 0,
-                                "end_time_ms": 0,
-                                "clean_text": "清洁后的文本",
-                            }
-                        ]
+        slot = self._acquire_clean_global_slot()
+        try:
+            content = self._chat_json(
+                config.get("url", self.settings.llm_clean_base_url),
+                api_key,
+                config.get("model", self.settings.llm_clean_model),
+                (
+                    "你是咨询访谈转写清洁助手。请在保留原始段落结构的前提下，修正 ASR 错字、标点、断句和明显不通顺表达，"
+                    "去除无意义口头语与重复卡顿，让文字更适合阅读和后续纪要分析。只返回 JSON。"
+                ),
+                json.dumps(
+                    {
+                        "task": "clean_transcript_segments",
+                        "batch": {"index": batch_index, "total": batch_count},
+                        "rules": [
+                            "返回 segments 数组，数量、顺序必须和输入 segments 完全一致",
+                            "每个输出段落必须保留对应 raw_segment_id、speaker、start_time_ms、end_time_ms",
+                            "clean_text 可以去除嗯、啊、这个、那个、就是、然后等无意义口头语，以及明显重复、卡顿、自我修正的短句",
+                            "可以结合上下文修正常见同音错字、ASR 误识别和明显不通顺表达，但不要改变事实、数字、金额、人名、公司名和专业名词",
+                            "不确定的内容宁可保留原文，不要编造、总结、扩写，也不要合并、拆分或删除段落",
+                        ],
+                        "output_schema": {
+                            "segments": [
+                                {
+                                    "raw_segment_id": "原始段落 id",
+                                    "speaker": "说话人",
+                                    "start_time_ms": 0,
+                                    "end_time_ms": 0,
+                                    "clean_text": "清洁后的文本",
+                                }
+                            ]
+                        },
+                        "segments": raw_segments,
                     },
-                    "segments": raw_segments,
-                },
-                ensure_ascii=False,
-            ),
-        )
+                    ensure_ascii=False,
+                ),
+            )
+        finally:
+            self._release_clean_global_slot(slot)
         data = self._loads_json(content)
         segments = data.get("segments") if isinstance(data, dict) else data
         if not isinstance(segments, list):
             raise RuntimeError("LLM_CLEAN_INVALID_JSON: 清洁稿模型未返回 segments 数组。")
         return self._normalize_clean_segments(raw_segments, segments)
+
+    def _clean_per_job_concurrency(self) -> int:
+        configured = self.settings.llm_clean_batch_concurrency_per_job or self.settings.llm_clean_batch_concurrency
+        try:
+            return max(1, int(configured or 1))
+        except (TypeError, ValueError):
+            return 3
+
+    def _clean_global_concurrency(self) -> int:
+        try:
+            return max(0, int(self.settings.llm_clean_global_concurrency or 0))
+        except (TypeError, ValueError):
+            return 3
+
+    def _acquire_clean_global_slot(self):
+        limit = self._clean_global_concurrency()
+        if limit <= 0 or (self.settings.app_env == "local" and self.settings.queue_sync):
+            return None
+        from redis import Redis
+
+        redis = Redis.from_url(self.settings.redis_url)
+        deadline = time.monotonic() + max(60, self.settings.llm_timeout_seconds + 120)
+        lock_timeout = max(120, self.settings.llm_timeout_seconds + 300)
+        while time.monotonic() < deadline:
+            for index in range(limit):
+                lock = redis.lock(f"llm:clean:slot:{index}", timeout=lock_timeout)
+                if lock.acquire(blocking=False):
+                    return lock
+            time.sleep(1)
+        raise RuntimeError("LLM_CLEAN_GLOBAL_CONCURRENCY_TIMEOUT: 清洁稿全局并发已满，等待超时。")
+
+    def _release_clean_global_slot(self, slot) -> None:
+        if not slot:
+            return
+        try:
+            slot.release()
+        except Exception:
+            pass
 
     def _normalize_clean_segments(self, raw_segments: list[dict], segments: list) -> list[dict]:
         cleaned = []

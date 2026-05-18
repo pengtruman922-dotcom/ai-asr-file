@@ -58,9 +58,11 @@ class Settings(BaseSettings):
     llm_qa_api_key: str = ""
     llm_qa_model: str = "qwen3.6-plus"
     llm_timeout_seconds: int = 600
-    llm_clean_batch_max_segments: int = 40
-    llm_clean_batch_max_chars: int = 12000
+    llm_clean_batch_max_segments: int = 120
+    llm_clean_batch_max_chars: int = 40000
     llm_clean_batch_concurrency: int = 3
+    llm_clean_batch_concurrency_per_job: int = 0
+    llm_clean_global_concurrency: int = 3
 
     max_upload_size_mb: int = 500
     max_recording_duration_hours: int = 3
