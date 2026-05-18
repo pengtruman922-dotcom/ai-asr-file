@@ -37,7 +37,7 @@ def main():
     queue_names = resolve_queue_names(sys.argv[1:], settings.worker_queues)
     print(f"Starting RQ worker for queues: {', '.join(queue_names)}", flush=True)
     worker = Worker([Queue(name, connection=redis) for name in queue_names], connection=redis)
-    worker.work()
+    worker.work(with_scheduler=True)
 
 
 if __name__ == "__main__":

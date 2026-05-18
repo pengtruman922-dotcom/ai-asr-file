@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     asr_model: str = "fun-asr"
     asr_poll_interval_seconds: int = 10
     asr_poll_timeout_seconds: int = 14400
+    asr_user_concurrency_limit: int = 5
+    asr_global_concurrency_limit: int = 30
+    asr_queue_retry_seconds: int = 30
     asr_diarization_enabled: bool = True
     asr_speaker_count: int = 0
 

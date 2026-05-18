@@ -90,6 +90,7 @@ export type QAThread = {
   created_at: string;
   updated_at: string;
   last_message_at: string;
+  message_count: number;
   messages?: QAMessage[];
 };
 

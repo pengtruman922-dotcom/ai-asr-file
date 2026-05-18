@@ -1752,6 +1752,7 @@ def thread_payload(thread: QAThread, db: Session, include_messages: bool = False
         "created_at": serialize_dt(thread.created_at),
         "updated_at": serialize_dt(thread.updated_at),
         "last_message_at": serialize_dt(messages[-1].created_at if messages else thread.updated_at),
+        "message_count": len(messages),
     }
     if include_messages:
         payload["messages"] = [message_payload(msg) for msg in messages]

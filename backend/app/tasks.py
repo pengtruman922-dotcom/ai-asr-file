@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 
 from sqlalchemy import delete
@@ -11,6 +11,7 @@ from .settings_service import get_ai_config
 from .models import (
     CleanTranscriptSegment,
     ProcessingJob,
+    Project,
     ProjectFile,
     QAMessage,
     QASession,
@@ -32,6 +33,7 @@ JOB_QUEUE_MAP = {
     "extract_text": "extract",
     "export": "default",
 }
+FINAL_JOB_STATUSES = {"succeeded", "failed", "canceled"}
 
 
 def queue_name_for_job_type(job_type: str) -> str:
@@ -41,7 +43,7 @@ def queue_name_for_job_type(job_type: str) -> str:
     return "default"
 
 
-def enqueue_job(job_id: str) -> None:
+def enqueue_job(job_id: str, delay_seconds: int = 0) -> None:
     settings = get_settings()
     if settings.app_env == "local" and settings.queue_sync:
         run_job(job_id)
@@ -58,11 +60,24 @@ def enqueue_job(job_id: str) -> None:
             job.metadata_json = metadata
 
     queue = Queue(queue_name, connection=Redis.from_url(settings.redis_url))
-    queue.enqueue("app.tasks.run_job", job_id, job_timeout="6h")
+    if delay_seconds > 0:
+        queue.enqueue_in(timedelta(seconds=delay_seconds), "app.tasks.run_job", job_id, job_timeout="6h")
+    else:
+        queue.enqueue("app.tasks.run_job", job_id, job_timeout="6h")
 
 
 def create_job(session, project_id: str | None, recording_id: str | None, job_type: str, metadata: dict | None = None) -> ProcessingJob:
     metadata = dict(metadata or {})
+    if not metadata.get("user_id"):
+        inferred_user_id = None
+        if metadata.get("file_id"):
+            project_file = session.get(ProjectFile, metadata.get("file_id"))
+            inferred_user_id = project_file.created_by_id if project_file else None
+        if not inferred_user_id and project_id:
+            project = session.get(Project, project_id)
+            inferred_user_id = project.owner_id if project else None
+        if inferred_user_id:
+            metadata["user_id"] = inferred_user_id
     metadata.setdefault("queue_name", queue_name_for_job_type(job_type))
     job = ProcessingJob(
         id=new_id("job"),
@@ -85,19 +100,16 @@ def run_job(job_id: str) -> None:
         job = session.get(ProcessingJob, job_id)
         if not job:
             return
-        if job.status == "canceled":
+        if job.status in FINAL_JOB_STATUSES:
             return
         job_type = job.job_type
         job.status = "running"
-        job.started_at = datetime.now(timezone.utc)
-        job.progress = 10
+        if not job.started_at:
+            job.started_at = datetime.now(timezone.utc)
+        job.progress = max(job.progress or 0, 10)
         recording = session.get(Recording, job.recording_id) if job.recording_id else None
         project_file = session.get(ProjectFile, job.file_id) if job.file_id else None
-        if recording and job.job_type == "asr_transcription":
-            recording.status = "asr_processing"
-            if project_file:
-                project_file.status = "asr_processing"
-        elif recording and job.job_type == "clean_transcript":
+        if recording and job.job_type == "clean_transcript":
             recording.status = "cleaning"
             if project_file:
                 project_file.status = "cleaning"
@@ -158,12 +170,23 @@ def run_job(job_id: str) -> None:
                     message.error_code = "LLM_CONTEXT_TOO_LONG" if "CONTEXT_TOO_LONG" in str(exc) else "LLM_CALL_FAILED"
 
 
+def _retry_metadata(job_type: str, metadata: dict | None) -> dict:
+    copied = dict(metadata or {})
+    if job_type != "asr_transcription":
+        return copied
+    keep_asr_keys = {"asr_speaker_count", "asr_speaker_mode"}
+    for key in list(copied.keys()):
+        if key.startswith("asr_") and key not in keep_asr_keys:
+            copied.pop(key, None)
+    return copied
+
+
 def retry_failed_job(job_id: str) -> str:
     with session_scope() as session:
         old = session.get(ProcessingJob, job_id)
         if not old or old.status != "failed":
             raise ValueError("JOB_NOT_RETRYABLE")
-        new = create_job(session, old.project_id, old.recording_id, old.job_type, old.metadata_json)
+        new = create_job(session, old.project_id, old.recording_id, old.job_type, _retry_metadata(old.job_type, old.metadata_json))
         new.file_id = old.file_id
         new.user_id = old.user_id
         new_id_value = new.id
@@ -238,6 +261,382 @@ def _asr_speaker_count_from_metadata(metadata: dict | None) -> int | None:
     return value if value in {0, 2, 3, 4} else None
 
 
+
+class _NoopLock:
+    def release(self) -> None:
+        return None
+
+
+def _acquire_redis_lock(lock_name: str, timeout: int = 60, blocking_timeout: int = 1):
+    settings = get_settings()
+    if settings.app_env == "local" and settings.queue_sync:
+        return _NoopLock()
+    from redis import Redis
+
+    lock = Redis.from_url(settings.redis_url).lock(lock_name, timeout=timeout)
+    if not lock.acquire(blocking=True, blocking_timeout=blocking_timeout):
+        return None
+    return lock
+
+
+def _release_lock(lock) -> None:
+    try:
+        lock.release()
+    except Exception:
+        pass
+
+
+def _asr_delay_seconds(value: int | None = None) -> int:
+    settings = get_settings()
+    raw_value = settings.asr_queue_retry_seconds if value is None else value
+    try:
+        return max(1, int(raw_value or 1))
+    except (TypeError, ValueError):
+        return 30
+
+
+def _is_asr_throttled_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "http 429" in message or "throttl" in message or "rate limit" in message or "too many requests" in message
+
+
+def _parse_utc_datetime(value) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _asr_project_file(session, job: ProcessingJob, recording: Recording | None = None) -> ProjectFile | None:
+    if job.file_id:
+        project_file = session.get(ProjectFile, job.file_id)
+        if project_file:
+            return project_file
+    if recording:
+        return session.query(ProjectFile).filter_by(recording_id=recording.id).first()
+    return None
+
+
+def _asr_active_counts(session, user_id: str | None, exclude_job_id: str) -> dict:
+    rows = session.query(ProcessingJob).filter(ProcessingJob.job_type == "asr_transcription", ProcessingJob.status == "running").all()
+    global_active = 0
+    user_active = 0
+    for row in rows:
+        if row.id == exclude_job_id:
+            continue
+        metadata = dict(row.metadata_json or {})
+        phase = str(metadata.get("asr_phase") or "")
+        has_external_task = bool(row.external_task_id or metadata.get("asr_task_id"))
+        if not has_external_task and phase not in {"submitted", "polling", "downloading", "finalizing"}:
+            continue
+        global_active += 1
+        if user_id and row.user_id == user_id:
+            user_active += 1
+    return {"global_active": global_active, "user_active": user_active}
+
+
+def _asr_capacity_wait(counts: dict, user_id: str | None) -> tuple[str, dict] | None:
+    settings = get_settings()
+    user_limit = int(settings.asr_user_concurrency_limit or 0)
+    global_limit = int(settings.asr_global_concurrency_limit or 0)
+    detail = {
+        "user_active": counts.get("user_active", 0),
+        "user_limit": user_limit,
+        "global_active": counts.get("global_active", 0),
+        "global_limit": global_limit,
+    }
+    if user_id and user_limit > 0 and detail["user_active"] >= user_limit:
+        return "user_limit", detail
+    if global_limit > 0 and detail["global_active"] >= global_limit:
+        return "global_limit", detail
+    return None
+
+
+def _mark_asr_waiting(job_id: str, reason: str, detail: dict | None = None, delay_seconds: int | None = None) -> None:
+    delay = _asr_delay_seconds(delay_seconds)
+    now = datetime.now(timezone.utc)
+    next_retry_at = now + timedelta(seconds=delay)
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        if not job or job.status in FINAL_JOB_STATUSES:
+            return
+        metadata = dict(job.metadata_json or {})
+        metadata.update(
+            {
+                "asr_phase": "waiting_capacity",
+                "asr_queue_reason": reason,
+                "asr_capacity": detail or {},
+                "asr_next_retry_at": next_retry_at.isoformat(),
+            }
+        )
+        job.metadata_json = metadata
+        job.status = "queued"
+        job.started_at = None
+        job.progress = 5
+        recording = session.get(Recording, job.recording_id) if job.recording_id else None
+        project_file = _asr_project_file(session, job, recording)
+        if recording and not job.external_task_id:
+            recording.status = "queued"
+        if project_file and not job.external_task_id:
+            project_file.status = "queued"
+    enqueue_job(job_id, delay_seconds=delay)
+
+
+def _reschedule_locked_asr(job_id: str) -> None:
+    delay = _asr_delay_seconds(5)
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        if not job or job.status in FINAL_JOB_STATUSES:
+            return
+        metadata = dict(job.metadata_json or {})
+        has_external_task = bool(job.external_task_id or metadata.get("asr_task_id"))
+    if has_external_task:
+        enqueue_job(job_id, delay_seconds=delay)
+    else:
+        _mark_asr_waiting(job_id, "job_lock_busy", delay_seconds=delay)
+
+
+def _prepare_asr_submission(job_id: str) -> tuple[str, str, int | None, str]:
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        if not job:
+            raise RuntimeError("JOB_NOT_FOUND")
+        recording = session.get(Recording, job.recording_id) if job.recording_id else None
+        if not recording:
+            raise RuntimeError("RECORDING_NOT_FOUND")
+        audio_url = storage.create_download_url(recording.object_key, expires_in=24 * 3600, storage_config=storage.recording_config(recording))
+        file_name = recording.file_name
+        metadata = dict(job.metadata_json or {})
+        speaker_count = _asr_speaker_count_from_metadata(metadata)
+        speaker_mode = "settings" if speaker_count is None else "auto" if speaker_count == 0 else "fixed"
+        metadata.update(
+            {
+                "asr_phase": "submitting",
+                "asr_file_name": file_name,
+                "asr_file_size_bytes": recording.file_size_bytes,
+                "asr_speaker_count": speaker_count,
+                "asr_speaker_mode": speaker_mode,
+                "asr_queue_reason": "",
+                "asr_next_retry_at": "",
+            }
+        )
+        job.metadata_json = metadata
+        job.status = "running"
+        job.progress = max(job.progress or 0, 15)
+        project_file = _asr_project_file(session, job, recording)
+        recording.status = "asr_processing"
+        if project_file:
+            project_file.status = "asr_processing"
+        return audio_url, file_name, speaker_count, speaker_mode
+
+
+def _save_asr_task_id(job_id: str, task_id: str) -> None:
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        if not job or job.status in FINAL_JOB_STATUSES:
+            return
+        metadata = dict(job.metadata_json or {})
+        now = datetime.now(timezone.utc)
+        metadata.update(
+            {
+                "asr_phase": "polling",
+                "asr_task_id": task_id,
+                "asr_submitted_at": metadata.get("asr_submitted_at") or now.isoformat(),
+                "asr_poll_count": int(metadata.get("asr_poll_count") or 0),
+                "asr_last_status": "SUBMITTED",
+            }
+        )
+        job.external_task_id = task_id
+        job.metadata_json = metadata
+        job.status = "running"
+        job.progress = max(job.progress or 0, 20)
+
+
+def _complete_asr_job(job_id: str, segments: list[dict]) -> None:
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        if not job or job.status in FINAL_JOB_STATUSES:
+            return
+        recording = session.get(Recording, job.recording_id) if job.recording_id else None
+        if not recording:
+            raise RuntimeError("RECORDING_NOT_FOUND")
+        session.execute(delete(RawTranscriptSegment).where(RawTranscriptSegment.recording_id == recording.id))
+        for item in segments:
+            session.add(
+                RawTranscriptSegment(
+                    id=new_id("segraw"),
+                    recording_id=recording.id,
+                    speaker=item["speaker"],
+                    start_time_ms=item["start_time_ms"],
+                    end_time_ms=item["end_time_ms"],
+                    text=item["text"],
+                    confidence=item.get("confidence"),
+                )
+            )
+        recording.status = "asr_completed"
+        recording.duration_seconds = max([item["end_time_ms"] for item in segments] or [0]) // 1000
+        project_file = _asr_project_file(session, job, recording)
+        if project_file:
+            project_file.status = "asr_completed"
+            project_file.duration_seconds = recording.duration_seconds
+        metadata = dict(job.metadata_json or {})
+        metadata.update({"asr_phase": "completed", "asr_completed_at": datetime.now(timezone.utc).isoformat()})
+        job.metadata_json = metadata
+        job.status = "succeeded"
+        job.progress = 100
+        job.finished_at = datetime.now(timezone.utc)
+        session.add(
+            UsageRecord(
+                id=new_id("use"),
+                project_id=recording.project_id,
+                recording_id=recording.id,
+                file_id=project_file.id if project_file else job.file_id,
+                user_id=job.user_id,
+                job_id=job.id,
+                call_type="asr",
+                model_provider="aliyun/mock",
+                model_name=get_ai_config("asr").get("model", get_settings().asr_model),
+                audio_duration_seconds=recording.duration_seconds,
+                status="succeeded",
+            )
+        )
+        next_job = create_job(session, recording.project_id, recording.id, "clean_transcript", {"file_id": project_file.id if project_file else job.file_id, "user_id": job.user_id})
+        next_id = next_job.id
+    enqueue_job(next_id)
+
+
+def _run_asr_inline(job_id: str, record_asr_event) -> None:
+    audio_url, file_name, speaker_count, speaker_mode = _prepare_asr_submission(job_id)
+
+    def save_external_task_id(task_id: str) -> None:
+        _save_asr_task_id(job_id, task_id)
+
+    record_asr_event("download_url_created", {"file_name": file_name, "speaker_count": speaker_count, "speaker_mode": speaker_mode})
+    segments = asr_client.transcribe(audio_url, file_name, speaker_count=speaker_count, on_task_id=save_external_task_id, on_event=record_asr_event)
+    _complete_asr_job(job_id, segments)
+
+
+def _submit_or_wait_asr(job_id: str, record_asr_event) -> None:
+    lock = _acquire_redis_lock("asr:submit_capacity", timeout=180, blocking_timeout=5)
+    if not lock:
+        _mark_asr_waiting(job_id, "scheduler_busy", delay_seconds=5)
+        return
+    try:
+        with session_scope() as session:
+            job = session.get(ProcessingJob, job_id)
+            if not job or job.status in FINAL_JOB_STATUSES:
+                return
+            metadata = dict(job.metadata_json or {})
+            existing_task_id = job.external_task_id or metadata.get("asr_task_id")
+            if existing_task_id:
+                enqueue_job(job_id, delay_seconds=_asr_delay_seconds(get_settings().asr_poll_interval_seconds))
+                return
+            counts = _asr_active_counts(session, job.user_id, job.id)
+            wait = _asr_capacity_wait(counts, job.user_id)
+        if wait:
+            reason, detail = wait
+            _mark_asr_waiting(job_id, reason, detail=detail)
+            return
+
+        audio_url, file_name, speaker_count, speaker_mode = _prepare_asr_submission(job_id)
+        record_asr_event("download_url_created", {"file_name": file_name, "speaker_count": speaker_count, "speaker_mode": speaker_mode})
+        try:
+            task_id = asr_client.submit_task(audio_url, file_name, speaker_count=speaker_count, on_event=record_asr_event)
+        except Exception as exc:
+            if _is_asr_throttled_error(exc):
+                _mark_asr_waiting(job_id, "asr_submit_throttled", detail={"error": str(exc)[:500]}, delay_seconds=60)
+                return
+            raise
+        _save_asr_task_id(job_id, task_id)
+    finally:
+        _release_lock(lock)
+    enqueue_job(job_id, delay_seconds=_asr_delay_seconds(get_settings().asr_poll_interval_seconds))
+
+
+def _poll_submitted_asr(job_id: str, task_id: str, record_asr_event) -> None:
+    settings = get_settings()
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        if not job or job.status in FINAL_JOB_STATUSES:
+            return
+        metadata = dict(job.metadata_json or {})
+        submitted_at = _parse_utc_datetime(metadata.get("asr_submitted_at")) or job.started_at or datetime.now(timezone.utc)
+        if datetime.now(timezone.utc) - submitted_at > timedelta(seconds=settings.asr_poll_timeout_seconds):
+            raise RuntimeError(f"ASR_TASK_TIMEOUT: task_id={task_id}")
+        poll_count = int(metadata.get("asr_poll_count") or 0) + 1
+        metadata.update({"asr_phase": "polling", "asr_poll_count": poll_count})
+        job.metadata_json = metadata
+        job.progress = max(job.progress or 0, 20)
+    try:
+        result = asr_client.poll_task(task_id, on_event=record_asr_event, poll_count=poll_count)
+    except Exception as exc:
+        if not _is_asr_throttled_error(exc):
+            raise
+        delay = _asr_delay_seconds(60)
+        next_poll_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        with session_scope() as session:
+            job = session.get(ProcessingJob, job_id)
+            if not job or job.status in FINAL_JOB_STATUSES:
+                return
+            metadata = dict(job.metadata_json or {})
+            metadata.update(
+                {
+                    "asr_phase": "polling",
+                    "asr_last_status": "THROTTLED",
+                    "asr_next_poll_at": next_poll_at.isoformat(),
+                    "asr_poll_count": poll_count,
+                    "asr_poll_error": str(exc)[:500],
+                }
+            )
+            job.metadata_json = metadata
+            job.status = "running"
+        enqueue_job(job_id, delay_seconds=delay)
+        return
+    if result.get("status") == "SUCCEEDED":
+        with session_scope() as session:
+            job = session.get(ProcessingJob, job_id)
+            if not job or job.status in FINAL_JOB_STATUSES:
+                return
+            metadata = dict(job.metadata_json or {})
+            metadata.update({"asr_phase": "downloading", "asr_last_status": "SUCCEEDED"})
+            job.metadata_json = metadata
+            job.progress = max(job.progress or 0, 90)
+        segments = asr_client.fetch_result_segments(str(result["result_url"]), task_id, on_event=record_asr_event)
+        _complete_asr_job(job_id, segments)
+        return
+
+    delay = _asr_delay_seconds(settings.asr_poll_interval_seconds)
+    next_poll_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        if not job or job.status in FINAL_JOB_STATUSES:
+            return
+        metadata = dict(job.metadata_json or {})
+        metadata.update(
+            {
+                "asr_phase": "polling",
+                "asr_last_status": result.get("status"),
+                "asr_next_poll_at": next_poll_at.isoformat(),
+                "asr_poll_count": poll_count,
+            }
+        )
+        job.metadata_json = metadata
+        job.status = "running"
+        job.progress = min(89, max(job.progress or 20, 20 + poll_count))
+        recording = session.get(Recording, job.recording_id) if job.recording_id else None
+        project_file = _asr_project_file(session, job, recording)
+        if recording:
+            recording.status = "asr_processing"
+        if project_file:
+            project_file.status = "asr_processing"
+    enqueue_job(job_id, delay_seconds=delay)
+
+
 def _run_asr(job_id: str) -> None:
     def record_asr_event(event: str, payload: dict | None = None) -> None:
         with session_scope() as event_session:
@@ -263,76 +662,26 @@ def _run_asr(job_id: str) -> None:
             metadata["asr_diagnostics"] = diagnostics
             task_job.metadata_json = metadata
 
-    with session_scope() as session:
-        job = session.get(ProcessingJob, job_id)
-        recording = session.get(Recording, job.recording_id)
-        audio_url = storage.create_download_url(recording.object_key, expires_in=24 * 3600, storage_config=storage.recording_config(recording))
-        file_name = recording.file_name
-        metadata = dict(job.metadata_json or {})
-        speaker_count = _asr_speaker_count_from_metadata(metadata)
-        speaker_mode = "settings" if speaker_count is None else "auto" if speaker_count == 0 else "fixed"
-        job.metadata_json = {
-            **metadata,
-            "asr_file_name": file_name,
-            "asr_file_size_bytes": recording.file_size_bytes,
-            "asr_speaker_count": speaker_count,
-            "asr_speaker_mode": speaker_mode,
-        }
-
-    def save_external_task_id(task_id: str) -> None:
-        with session_scope() as task_session:
-            task_job = task_session.get(ProcessingJob, job_id)
-            if task_job:
-                task_job.external_task_id = task_id
-                task_job.metadata_json = {**(task_job.metadata_json or {}), "asr_task_id": task_id}
-
-    record_asr_event("download_url_created", {"file_name": file_name, "speaker_count": speaker_count, "speaker_mode": speaker_mode})
-    segments = asr_client.transcribe(audio_url, file_name, speaker_count=speaker_count, on_task_id=save_external_task_id, on_event=record_asr_event)
-
-    with session_scope() as session:
-        job = session.get(ProcessingJob, job_id)
-        recording = session.get(Recording, job.recording_id)
-        session.execute(delete(RawTranscriptSegment).where(RawTranscriptSegment.recording_id == recording.id))
-        for item in segments:
-            session.add(
-                RawTranscriptSegment(
-                    id=new_id("segraw"),
-                    recording_id=recording.id,
-                    speaker=item["speaker"],
-                    start_time_ms=item["start_time_ms"],
-                    end_time_ms=item["end_time_ms"],
-                    text=item["text"],
-                    confidence=item.get("confidence"),
-                )
-            )
-        recording.status = "asr_completed"
-        recording.duration_seconds = max([item["end_time_ms"] for item in segments] or [0]) // 1000
-        project_file = session.query(ProjectFile).filter_by(recording_id=recording.id).first()
-        if project_file:
-            project_file.status = "asr_completed"
-            project_file.duration_seconds = recording.duration_seconds
-        job.status = "succeeded"
-        job.progress = 100
-        job.finished_at = datetime.now(timezone.utc)
-        session.add(
-            UsageRecord(
-                id=new_id("use"),
-                project_id=recording.project_id,
-                recording_id=recording.id,
-                file_id=project_file.id if project_file else job.file_id,
-                user_id=job.user_id,
-                job_id=job.id,
-                call_type="asr",
-                model_provider="aliyun/mock",
-                model_name=get_ai_config("asr").get("model", get_settings().asr_model),
-                audio_duration_seconds=recording.duration_seconds,
-                status="succeeded",
-            )
-        )
-        next_job = create_job(session, recording.project_id, recording.id, "clean_transcript", {"file_id": project_file.id if project_file else job.file_id, "user_id": job.user_id})
-        next_id = next_job.id
-    enqueue_job(next_id)
-
+    lock = _acquire_redis_lock(f"asr:job:{job_id}", timeout=300, blocking_timeout=1)
+    if not lock:
+        _reschedule_locked_asr(job_id)
+        return
+    try:
+        with session_scope() as session:
+            job = session.get(ProcessingJob, job_id)
+            if not job or job.status in FINAL_JOB_STATUSES:
+                return
+            metadata = dict(job.metadata_json or {})
+            task_id = job.external_task_id or metadata.get("asr_task_id")
+        if asr_client.use_local_mock():
+            _run_asr_inline(job_id, record_asr_event)
+            return
+        if task_id:
+            _poll_submitted_asr(job_id, str(task_id), record_asr_event)
+            return
+        _submit_or_wait_asr(job_id, record_asr_event)
+    finally:
+        _release_lock(lock)
 
 def _run_clean(job_id: str) -> None:
     event_lock = Lock()

@@ -17,16 +17,14 @@ class ASRClient:
         self.settings = get_settings()
 
     def transcribe(self, audio_url: str, file_name: str, speaker_count: int | None = None, on_task_id: Callable[[str], None] | None = None, on_event: Callable[[str, dict], None] | None = None) -> list[dict]:
-        config = get_ai_config("asr")
-        api_key = config.get("api_key", "")
-        if self._use_local_mock(self.settings.asr_mock_enabled, api_key):
+        runtime = self._runtime_config()
+        if runtime["mock"]:
             self._emit_asr_event(on_event, "mock_used", {"file_name": file_name})
             return self._mock_segments(file_name)
-        if not api_key:
-            raise RuntimeError("ASR_API_KEY_MISSING: 请先在系统设置中配置 ASR API Key，或在 Railway 变量中配置 ASR_API_KEY。")
 
-        submit_url = (config.get("url") or self.settings.asr_api_url).strip().rstrip("/")
-        model = (config.get("model") or self.settings.asr_model).strip()
+        submit_url = str(runtime["submit_url"])
+        api_key = str(runtime["api_key"])
+        model = str(runtime["model"])
         self._emit_asr_event(on_event, "submit_start", {"model": model, "url": submit_url})
         task_id = self._submit_task(submit_url, api_key, model, audio_url, speaker_count=speaker_count, on_event=on_event)
         if on_task_id:
@@ -41,6 +39,80 @@ class ASRClient:
         if not segments:
             raise RuntimeError("ASR_RESULT_EMPTY: 识别结果为空，请检查音频是否包含可识别语音。")
         return segments
+
+    def use_local_mock(self) -> bool:
+        return bool(self._runtime_config()["mock"])
+
+    def submit_task(self, audio_url: str, file_name: str, speaker_count: int | None = None, on_event: Callable[[str, dict], None] | None = None) -> str:
+        runtime = self._runtime_config()
+        if runtime["mock"]:
+            raise RuntimeError("ASR_MOCK_SUBMIT_UNSUPPORTED")
+        submit_url = str(runtime["submit_url"])
+        model = str(runtime["model"])
+        self._emit_asr_event(on_event, "submit_start", {"model": model, "url": submit_url})
+        task_id = self._submit_task(submit_url, str(runtime["api_key"]), model, audio_url, speaker_count=speaker_count, on_event=on_event)
+        self._emit_asr_event(on_event, "task_id_received", {"task_id": task_id})
+        return task_id
+
+    def poll_task(self, task_id: str, on_event: Callable[[str, dict], None] | None = None, poll_count: int = 0) -> dict:
+        runtime = self._runtime_config()
+        if runtime["mock"]:
+            raise RuntimeError("ASR_MOCK_POLL_UNSUPPORTED")
+        task_url = self._task_url(str(runtime["submit_url"]), task_id)
+        poll_started = time.monotonic()
+        response = requests.post(
+            task_url,
+            headers={
+                "Authorization": f"Bearer {runtime['api_key']}",
+                "Content-Type": "application/json",
+                "X-DashScope-Async": "enable",
+            },
+            timeout=60,
+        )
+        self._raise_for_api_error(response, "ASR_POLL_FAILED")
+        payload = response.json()
+        output = payload.get("output") if isinstance(payload.get("output"), dict) else payload
+        status = str(output.get("task_status") or output.get("status") or "").upper()
+        self._emit_asr_event(
+            on_event,
+            "poll_status",
+            {"task_id": task_id, "poll_count": poll_count, "status": status or "UNKNOWN", "elapsed_ms": int((time.monotonic() - poll_started) * 1000)},
+        )
+
+        if status == "SUCCEEDED":
+            result_url = self._extract_transcription_url(output)
+            self._emit_asr_event(on_event, "result_url_received", {"task_id": task_id, "poll_count": poll_count})
+            return {"status": "SUCCEEDED", "result_url": result_url}
+        if status in {"FAILED", "CANCELED", "CANCELLED"}:
+            message = output.get("message") or payload.get("message") or self._compact_json(output)
+            raise RuntimeError(f"ASR_TASK_FAILED: task_id={task_id}, status={status}, message={message}")
+        if status not in {"PENDING", "RUNNING", ""}:
+            raise RuntimeError(f"ASR_TASK_UNKNOWN_STATUS: task_id={task_id}, status={status}, response={self._compact_json(output)}")
+        return {"status": status or "UNKNOWN"}
+
+    def fetch_result_segments(self, result_url: str, task_id: str, on_event: Callable[[str, dict], None] | None = None) -> list[dict]:
+        self._emit_asr_event(on_event, "result_download_start", {"task_id": task_id})
+        result = self._download_transcription_result(result_url)
+        self._emit_asr_event(on_event, "result_download_complete", {"task_id": task_id})
+        segments = self._parse_transcription_result(result)
+        self._emit_asr_event(on_event, "parse_complete", {"task_id": task_id, "segment_count": len(segments)})
+        if not segments:
+            raise RuntimeError("ASR_RESULT_EMPTY: 识别结果为空，请检查音频是否包含可识别语音。")
+        return segments
+
+    def _runtime_config(self) -> dict:
+        config = get_ai_config("asr")
+        api_key = config.get("api_key", "")
+        if self._use_local_mock(self.settings.asr_mock_enabled, api_key):
+            return {"mock": True}
+        if not api_key:
+            raise RuntimeError("ASR_API_KEY_MISSING: 请先配置 ASR API Key。")
+        return {
+            "mock": False,
+            "api_key": api_key,
+            "submit_url": (config.get("url") or self.settings.asr_api_url).strip().rstrip("/"),
+            "model": (config.get("model") or self.settings.asr_model).strip(),
+        }
 
     def _submit_task(self, submit_url: str, api_key: str, model: str, audio_url: str, speaker_count: int | None = None, on_event: Callable[[str, dict], None] | None = None) -> str:
         speaker_count_value = self.settings.asr_speaker_count if speaker_count is None else int(speaker_count or 0)

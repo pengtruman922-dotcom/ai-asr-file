@@ -78,6 +78,7 @@ Optional split workers:
 - Add an LLM worker with `python -m app.worker llm`.
 - Add an extraction worker with `python -m app.worker extract`.
 - Set `TASK_QUEUE_ROUTING=split` on the web service and every worker only after all split workers are deployed. Without this variable, jobs continue to use the legacy `default` queue.
+- Workers start RQ with the scheduler enabled, so delayed ASR poll jobs can wake up automatically.
 
 Required production variables:
 
@@ -103,6 +104,9 @@ ASR_API_KEY=<Aliyun key>
 ASR_MODEL=fun-asr
 ASR_POLL_INTERVAL_SECONDS=10
 ASR_POLL_TIMEOUT_SECONDS=14400
+ASR_USER_CONCURRENCY_LIMIT=5
+ASR_GLOBAL_CONCURRENCY_LIMIT=30
+ASR_QUEUE_RETRY_SECONDS=30
 LLM_CLEAN_API_KEY=<Aliyun key>
 LLM_SUMMARY_API_KEY=<Aliyun key>
 LLM_QA_API_KEY=<Aliyun key>

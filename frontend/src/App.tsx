@@ -199,6 +199,30 @@ const QUEUE_LABELS: Record<string, string> = {
   extract: '资料提取',
 };
 
+const ASR_QUEUE_REASON_LABELS: Record<string, string> = {
+  user_limit: '该账号 ASR 并发已满',
+  global_limit: '全平台 ASR 并发已满',
+  scheduler_busy: 'ASR 调度器繁忙，稍后重试',
+  job_lock_busy: '任务状态刷新中，稍后重试',
+  asr_submit_throttled: 'ASR 接口限流，稍后自动重试',
+};
+
+function jobQueueNote(job: Job) {
+  if (job.job_type !== 'asr_transcription') return '';
+  const metadata = job.metadata || {};
+  const reason = String(metadata.asr_queue_reason || '');
+  const reasonLabel = ASR_QUEUE_REASON_LABELS[reason] || '';
+  if (!reasonLabel) return '';
+  const capacity = (metadata.asr_capacity || {}) as Record<string, unknown>;
+  if (reason === 'user_limit') {
+    return `${reasonLabel}（${capacity.user_active || 0}/${capacity.user_limit || 0}）`;
+  }
+  if (reason === 'global_limit') {
+    return `${reasonLabel}（${capacity.global_active || 0}/${capacity.global_limit || 0}）`;
+  }
+  return reasonLabel;
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), Math.max(min, max));
 }
@@ -1049,29 +1073,39 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     }
   };
 
+  const performThreadDelete = async (thread: QAThread, emptyThread = false) => {
+    try {
+      await api(`/api/qa-threads/${thread.thread_id}`, { method: 'DELETE' });
+      message.success(emptyThread ? '空对话已删除' : '对话已删除');
+      const remaining = threads.filter((item) => item.thread_id !== thread.thread_id);
+      if (currentThreadId === thread.thread_id) {
+        const nextThreadId = remaining[0]?.thread_id || null;
+        setCurrentThreadId(nextThreadId);
+        if (!nextThreadId) {
+          restoredThreadSelectionRef.current = null;
+          setMessages([]);
+          setQaSelectionMode('current');
+          setCheckedIds(currentQaSelection(recordings, selectedId));
+        }
+      }
+      void loadThreads();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '删除对话失败');
+    }
+  };
+
   const deleteThread = (thread: QAThread) => {
+    if (thread.message_count === 0) {
+      void performThreadDelete(thread, true);
+      return;
+    }
     Modal.confirm({
       title: '删除该对话？',
       content: '删除后，该对话中的问答记录将无法恢复。',
       okText: '删除',
       cancelText: '取消',
       okButtonProps: { danger: true },
-      onOk: async () => {
-        await api(`/api/qa-threads/${thread.thread_id}`, { method: 'DELETE' });
-        message.success('对话已删除');
-        const remaining = threads.filter((item) => item.thread_id !== thread.thread_id);
-        if (currentThreadId === thread.thread_id) {
-          const nextThreadId = remaining[0]?.thread_id || null;
-          setCurrentThreadId(nextThreadId);
-          if (!nextThreadId) {
-            restoredThreadSelectionRef.current = null;
-            setMessages([]);
-            setQaSelectionMode('current');
-            setCheckedIds(currentQaSelection(recordings, selectedId));
-          }
-        }
-        void loadThreads();
-      },
+      onOk: () => performThreadDelete(thread),
     });
   };
 
@@ -1457,50 +1491,66 @@ function QAView({ checked, selectionMode, recordings, threads, currentThreadId, 
   const selectionText = selectedNames.length
     ? `${selectedNames.slice(0, 3).join(' / ')}${selectedNames.length > 3 ? ` 等 ${selectedNames.length} 份` : ''}`
     : readyCount ? '请选择左侧已处理完成的文件作为参考材料' : '暂无处理完成的文件可用于问答';
+  const currentThread = threads.find((thread) => thread.thread_id === currentThreadId) || null;
+  const threadDropdown = (
+    <div className="qa-thread-popover">
+      <div className="qa-thread-popover-title">历史对话</div>
+      <div className="qa-thread-list">
+        {threads.length ? threads.map((thread) => {
+          const active = thread.thread_id === currentThreadId;
+          return (
+            <div
+              key={thread.thread_id}
+              role="button"
+              tabIndex={0}
+              className={active ? 'qa-thread-item active' : 'qa-thread-item'}
+              onClick={() => setCurrentThreadId(thread.thread_id)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  setCurrentThreadId(thread.thread_id);
+                }
+              }}
+            >
+              <div className="qa-thread-meta">
+                <Text strong className="qa-thread-title">{thread.title || '新对话'}</Text>
+                <Text type="secondary" className="qa-thread-time">
+                  {formatMonthDayTime(thread.last_message_at || thread.updated_at)}
+                  {thread.message_count === 0 ? ' · 空对话' : ''}
+                </Text>
+              </div>
+              <Button
+                size="small"
+                type="text"
+                danger
+                icon={<CloseOutlined />}
+                aria-label="删除对话"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onDeleteThread(thread);
+                }}
+              />
+            </div>
+          );
+        }) : <div className="qa-thread-empty">暂无历史对话，点击“新建对话”开始。</div>}
+      </div>
+    </div>
+  );
   return <Space direction="vertical" style={{ width: '100%' }}>
     <div className="qa-topbar">
-      <div>
-        <Text strong>问答对话</Text>
-        <div className="qa-topbar-sub">新对话默认使用当前文件作为参考材料</div>
-      </div>
       <Button type="primary" icon={<PlusOutlined />} onClick={onNewThread} className="qa-new-thread-btn">新建对话</Button>
     </div>
-    <div className="qa-thread-list">
-      {threads.length ? threads.map((thread) => {
-        const active = thread.thread_id === currentThreadId;
-        return (
-          <div
-            key={thread.thread_id}
-            role="button"
-            tabIndex={0}
-            className={active ? 'qa-thread-item active' : 'qa-thread-item'}
-            onClick={() => setCurrentThreadId(thread.thread_id)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault();
-                setCurrentThreadId(thread.thread_id);
-              }
-            }}
-          >
-            <div className="qa-thread-meta">
-              <Text strong className="qa-thread-title">{thread.title || '新对话'}</Text>
-              <Text type="secondary" className="qa-thread-time">{formatMonthDayTime(thread.last_message_at || thread.updated_at)}</Text>
-            </div>
-            <Button
-              size="small"
-              type="text"
-              danger
-              icon={<CloseOutlined />}
-              aria-label="删除对话"
-              onClick={(event) => {
-                event.stopPropagation();
-                onDeleteThread(thread);
-              }}
-            />
-          </div>
-        );
-      }) : <div className="qa-thread-empty">暂无历史对话，点击“新建对话”开始。</div>}
-    </div>
+    <Dropdown trigger={['click']} placement="bottomLeft" dropdownRender={() => threadDropdown}>
+      <button type="button" className="qa-current-thread">
+        <span className="qa-current-thread-main">
+          <Text strong className="qa-current-thread-title">{currentThread?.title || '暂无对话'}</Text>
+          <Text type="secondary" className="qa-current-thread-time">
+            {currentThread ? formatMonthDayTime(currentThread.last_message_at || currentThread.updated_at) : '点击新建对话开始'}
+          </Text>
+        </span>
+        <DownOutlined />
+      </button>
+    </Dropdown>
     <div className="qa-selection-summary">
       <Tag color={selectionMode === 'current' ? 'blue' : 'geekblue'}>{selectionLabel}：{checked.length} 份</Tag>
       <Text type="secondary" title={selectedNames.join(' / ')}>{selectionText}</Text>
@@ -1820,10 +1870,11 @@ function QueueModal({ open, projectId, clockNow, onClose, onRefresh }: { open: b
       },
     });
   };
-  return <Modal title="处理队列" open={open} onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={980}><Table rowKey="job_id" dataSource={jobs} pagination={false} columns={[
+  return <Modal title="处理队列" open={open} onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={1100}><Table rowKey="job_id" dataSource={jobs} pagination={false} columns={[
     { title: '任务', dataIndex: 'job_type', render: (value: string) => jobTypeLabel(value) },
     { title: '队列', dataIndex: 'queue_name', width: 100, render: (value: string) => <Tag>{queueLabel(value)}</Tag> },
     { title: '状态', dataIndex: 'status', render: (value: string, job: Job) => <Space><Tag color={value === 'failed' ? 'red' : value === 'canceled' ? 'default' : ['queued', 'running'].includes(value) ? 'blue' : 'green'}>{jobStatusLabel(value)}</Tag>{['queued', 'running'].includes(value) && <Text type="secondary">{elapsedSince(job.started_at || job.created_at, clockNow)}</Text>}</Space> },
+    { title: '说明', width: 220, render: (_, job: Job) => jobQueueNote(job) ? <Text type="secondary">{jobQueueNote(job)}</Text> : null },
     { title: '进度', dataIndex: 'progress', width: 150, render: (value: number) => <Progress percent={value || 0} size="small" /> },
     { title: '错误', dataIndex: 'error_message' },
     { title: '操作', width: 120, render: (_, job) => job.status === 'failed' ? <Button onClick={() => retry(job)}>重试</Button> : job.status === 'queued' ? <Button danger onClick={() => cancel(job)}>取消</Button> : null }
