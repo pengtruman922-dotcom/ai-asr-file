@@ -1480,6 +1480,8 @@ function MarkdownLite({ markdown }: { markdown: string }) {
 }
 
 function QAView({ checked, selectionMode, recordings, threads, currentThreadId, setCurrentThreadId, messages, question, setQuestion, onAsk, onNewThread, onDeleteThread, submitting, waitingForAnswer }: { checked: string[]; selectionMode: QaSelectionMode; recordings: Recording[]; threads: QAThread[]; currentThreadId: string | null; setCurrentThreadId: (id: string) => void; messages: QAMessage[]; question: string; setQuestion: (v: string) => void; onAsk: () => void; onNewThread: () => void; onDeleteThread: (thread: QAThread) => void; submitting: boolean; waitingForAnswer: boolean }) {
+  const currentThreadButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [threadMenuWidth, setThreadMenuWidth] = useState(0);
   const { selectedNames, readyCount } = useMemo(() => {
     const checkedSet = new Set(checked);
     return {
@@ -1492,6 +1494,15 @@ function QAView({ checked, selectionMode, recordings, threads, currentThreadId, 
     ? `${selectedNames.slice(0, 3).join(' / ')}${selectedNames.length > 3 ? ` 等 ${selectedNames.length} 份` : ''}`
     : readyCount ? '请选择左侧已处理完成的文件作为参考材料' : '暂无处理完成的文件可用于问答';
   const currentThread = threads.find((thread) => thread.thread_id === currentThreadId) || null;
+  const syncThreadMenuWidth = useCallback(() => {
+    const width = currentThreadButtonRef.current?.getBoundingClientRect().width || 0;
+    if (width) setThreadMenuWidth(Math.round(width));
+  }, []);
+  useEffect(() => {
+    syncThreadMenuWidth();
+    window.addEventListener('resize', syncThreadMenuWidth);
+    return () => window.removeEventListener('resize', syncThreadMenuWidth);
+  }, [syncThreadMenuWidth]);
   const threadDropdown = (
     <div className="qa-thread-popover">
       <div className="qa-thread-popover-title">历史对话</div>
@@ -1532,25 +1543,31 @@ function QAView({ checked, selectionMode, recordings, threads, currentThreadId, 
               />
             </div>
           );
-        }) : <div className="qa-thread-empty">暂无历史对话，点击“新建对话”开始。</div>}
+        }) : <div className="qa-thread-empty">暂无历史对话，输入问题后将自动创建首个对话。</div>}
       </div>
     </div>
   );
   return <Space direction="vertical" style={{ width: '100%' }}>
     <div className="qa-topbar">
-      <Button type="primary" icon={<PlusOutlined />} onClick={onNewThread} className="qa-new-thread-btn">新建对话</Button>
+      <Button type="primary" icon={<PlusOutlined />} onClick={onNewThread} disabled={!threads.length} className="qa-new-thread-btn">新建对话</Button>
+      <Dropdown
+        trigger={['click']}
+        placement="bottomLeft"
+        overlayStyle={threadMenuWidth ? { width: threadMenuWidth } : undefined}
+        dropdownRender={() => threadDropdown}
+        onOpenChange={(open) => { if (open) syncThreadMenuWidth(); }}
+      >
+        <button type="button" ref={currentThreadButtonRef} className="qa-current-thread">
+          <span className="qa-current-thread-main">
+            <Text strong className="qa-current-thread-title">{currentThread?.title || '暂无历史对话'}</Text>
+            <Text type="secondary" className="qa-current-thread-time">
+              {currentThread ? formatMonthDayTime(currentThread.last_message_at || currentThread.updated_at) : '输入问题后将自动创建首个对话'}
+            </Text>
+          </span>
+          <DownOutlined />
+        </button>
+      </Dropdown>
     </div>
-    <Dropdown trigger={['click']} placement="bottomLeft" dropdownRender={() => threadDropdown}>
-      <button type="button" className="qa-current-thread">
-        <span className="qa-current-thread-main">
-          <Text strong className="qa-current-thread-title">{currentThread?.title || '暂无对话'}</Text>
-          <Text type="secondary" className="qa-current-thread-time">
-            {currentThread ? formatMonthDayTime(currentThread.last_message_at || currentThread.updated_at) : '点击新建对话开始'}
-          </Text>
-        </span>
-        <DownOutlined />
-      </button>
-    </Dropdown>
     <div className="qa-selection-summary">
       <Tag color={selectionMode === 'current' ? 'blue' : 'geekblue'}>{selectionLabel}：{checked.length} 份</Tag>
       <Text type="secondary" title={selectedNames.join(' / ')}>{selectionText}</Text>
