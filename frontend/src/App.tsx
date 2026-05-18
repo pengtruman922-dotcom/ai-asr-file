@@ -986,6 +986,15 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   };
 
   const createThread = async () => {
+    const pendingNewThread = threads.find((thread) => (thread.title || '').trim() === '新对话');
+    if (pendingNewThread) {
+      setCurrentThreadId(pendingNewThread.thread_id);
+      restoredThreadSelectionRef.current = pendingNewThread.thread_id;
+      setQaSelectionMode('current');
+      setCheckedIds(currentQaSelection(recordings, selectedId));
+      setMessages([]);
+      return;
+    }
     const data = await api<QAThread>(`/api/projects/${projectId}/qa-threads`, { method: 'POST', body: JSON.stringify({}) });
     setCurrentThreadId(data.thread_id);
     restoredThreadSelectionRef.current = data.thread_id;
@@ -1549,7 +1558,7 @@ function QAView({ checked, selectionMode, recordings, threads, currentThreadId, 
   );
   return <Space direction="vertical" style={{ width: '100%' }}>
     <div className="qa-topbar">
-      <Button type="primary" icon={<PlusOutlined />} onClick={onNewThread} disabled={!threads.length} className="qa-new-thread-btn">新建对话</Button>
+      <Button type="primary" icon={<PlusOutlined />} onClick={onNewThread} className="qa-new-thread-btn">新建对话</Button>
       <Dropdown
         trigger={['click']}
         placement="bottomLeft"
