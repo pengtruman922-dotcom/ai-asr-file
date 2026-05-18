@@ -1811,6 +1811,7 @@ function postFormWithProgress(url: string, body: FormData, onProgress: (value: n
     const token = getToken();
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
     xhr.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100)); };
+    xhr.upload.onload = () => onProgress(100);
     xhr.onload = () => {
       const data = safeParseJson(xhr.responseText);
       if (xhr.status >= 200 && xhr.status < 300 && data?.success !== false) {

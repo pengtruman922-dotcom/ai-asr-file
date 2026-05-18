@@ -4,12 +4,15 @@ import uuid
 
 import boto3
 from botocore.client import Config
+from boto3.s3.transfer import TransferConfig
 
 from .config import get_settings
 from .settings_service import get_storage_config
 
 
 class StorageService:
+    SMALL_FILE_MULTIPART_THRESHOLD = 64 * 1024 * 1024
+
     def __init__(self):
         self.settings = get_settings()
         self.local_root = self.settings.local_storage_path
@@ -108,6 +111,7 @@ class StorageService:
             config["bucket_name"],
             full_key,
             ExtraArgs={"ContentType": content_type or "application/octet-stream"},
+            Config=TransferConfig(multipart_threshold=self.SMALL_FILE_MULTIPART_THRESHOLD),
         )
 
     def create_download_url(self, object_key: str, expires_in: int = 3600, storage_config: dict | None = None):
