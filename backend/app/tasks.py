@@ -148,11 +148,14 @@ def run_job(job_id: str) -> None:
         with session_scope() as session:
             job = session.get(ProcessingJob, job_id)
             if job:
+                message = str(exc)
                 job.status = "failed"
                 job.error_code = _error_code_for(job_type)
-                job.error_message = str(exc)
+                job.error_message = message
                 job.finished_at = datetime.now(timezone.utc)
                 job.progress = 100
+                if job_type == "asr_transcription":
+                    _update_asr_failure_metadata(job, message)
                 if job.recording_id:
                     recording = session.get(Recording, job.recording_id)
                     if recording:
@@ -300,6 +303,30 @@ def _is_asr_throttled_error(exc: Exception) -> bool:
     return "http 429" in message or "throttl" in message or "rate limit" in message or "too many requests" in message
 
 
+def _asr_failure_hint(message: str) -> str:
+    lower = (message or "").lower()
+    if "content_length_check_failed" in lower:
+        return "DashScope 下载音频时 Content-Length 校验失败，优先检查 Bucket 下载 URL、文件完整性和对象大小。"
+    if "download" in lower or "invalidfile.downloadfailed" in lower:
+        return "DashScope 无法下载音频文件，优先检查 Bucket 预签名 URL 是否可公网完整下载。"
+    if "unknown error" in lower:
+        return "DashScope 返回未知处理错误，可先重试；若稳定复现，请检查音频编码、文件损坏或声道/说话人分离参数。"
+    if "diarization" in lower or "speaker" in lower or "channel" in lower:
+        return "错误可能与说话人分离或声道参数有关，可尝试转为单声道或关闭说话人分离后重试。"
+    if "unsupported" in lower or "format" in lower or "decode" in lower:
+        return "错误可能与音频格式或编码有关，建议转换为标准 mp3/wav/m4a(AAC) 后重试。"
+    return ""
+
+
+def _update_asr_failure_metadata(job, message: str) -> None:
+    metadata = dict(job.metadata_json or {})
+    diagnostics = dict(metadata.get("asr_diagnostics") or {})
+    diagnostics["failure_hint"] = _asr_failure_hint(message)
+    diagnostics["failure_message"] = message[:1000]
+    metadata["asr_diagnostics"] = diagnostics
+    job.metadata_json = metadata
+
+
 def _parse_utc_datetime(value) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -432,6 +459,16 @@ def _prepare_asr_submission(job_id: str) -> tuple[str, str, int | None, str]:
         recording.status = "asr_processing"
         if project_file:
             project_file.status = "asr_processing"
+        expected_size = recording.file_size_bytes
+    url_diagnostics = asr_client.inspect_audio_url(audio_url, expected_size=expected_size)
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        if job:
+            metadata = dict(job.metadata_json or {})
+            diagnostics = dict(metadata.get("asr_diagnostics") or {})
+            diagnostics["audio_url_preflight"] = url_diagnostics
+            metadata["asr_diagnostics"] = diagnostics
+            job.metadata_json = metadata
         return audio_url, file_name, speaker_count, speaker_mode
 
 
@@ -659,6 +696,10 @@ def _run_asr(job_id: str) -> None:
             if event == "poll_status":
                 diagnostics["last_status"] = event_payload.get("status")
                 diagnostics["poll_count"] = event_payload.get("poll_count")
+            elif event == "task_failed":
+                diagnostics["last_status"] = event_payload.get("status")
+                diagnostics["failure_detail"] = event_payload
+                diagnostics["failure_hint"] = _asr_failure_hint(str(event_payload.get("message") or ""))
             metadata["asr_diagnostics"] = diagnostics
             task_job.metadata_json = metadata
 

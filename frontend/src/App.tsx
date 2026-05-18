@@ -223,6 +223,17 @@ function jobQueueNote(job: Job) {
   return reasonLabel;
 }
 
+function jobFailureNote(job: Job) {
+  const diagnostics = (job.metadata?.asr_diagnostics || {}) as Record<string, unknown>;
+  const hint = String(diagnostics.failure_hint || '');
+  if (hint) return hint;
+  const messageText = `${job.error_code || ''} ${job.error_message || ''}`.toLowerCase();
+  if (messageText.includes('content_length_check_failed')) return 'DashScope 下载音频时 Content-Length 校验失败，请检查 Bucket 下载和文件完整性。';
+  if (messageText.includes('download')) return 'DashScope 无法下载音频文件，请检查 Bucket 预签名 URL 是否可公网访问。';
+  if (messageText.includes('unknown error')) return 'DashScope 返回未知处理错误，可先重试；若稳定复现请检查音频编码或声道参数。';
+  return '';
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), Math.max(min, max));
 }
@@ -1901,7 +1912,10 @@ function QueueModal({ open, projectId, clockNow, onClose, onRefresh }: { open: b
     { title: '任务', dataIndex: 'job_type', render: (value: string) => jobTypeLabel(value) },
     { title: '队列', dataIndex: 'queue_name', width: 100, render: (value: string) => <Tag>{queueLabel(value)}</Tag> },
     { title: '状态', dataIndex: 'status', render: (value: string, job: Job) => <Space><Tag color={value === 'failed' ? 'red' : value === 'canceled' ? 'default' : ['queued', 'running'].includes(value) ? 'blue' : 'green'}>{jobStatusLabel(value)}</Tag>{['queued', 'running'].includes(value) && <Text type="secondary">{elapsedSince(job.started_at || job.created_at, clockNow)}</Text>}</Space> },
-    { title: '说明', width: 220, render: (_, job: Job) => jobQueueNote(job) ? <Text type="secondary">{jobQueueNote(job)}</Text> : null },
+    { title: '说明', width: 260, render: (_, job: Job) => {
+      const note = job.status === 'failed' ? jobFailureNote(job) : jobQueueNote(job);
+      return note ? <Text type={job.status === 'failed' ? 'warning' : 'secondary'}>{note}</Text> : null;
+    } },
     { title: '进度', dataIndex: 'progress', width: 150, render: (value: number) => <Progress percent={value || 0} size="small" /> },
     { title: '错误', dataIndex: 'error_message' },
     { title: '操作', width: 120, render: (_, job) => job.status === 'failed' ? <Button onClick={() => retry(job)}>重试</Button> : job.status === 'queued' ? <Button danger onClick={() => cancel(job)}>取消</Button> : null }

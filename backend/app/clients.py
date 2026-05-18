@@ -85,6 +85,17 @@ class ASRClient:
             return {"status": "SUCCEEDED", "result_url": result_url}
         if status in {"FAILED", "CANCELED", "CANCELLED"}:
             message = output.get("message") or payload.get("message") or self._compact_json(output)
+            self._emit_asr_event(
+                on_event,
+                "task_failed",
+                {
+                    "task_id": task_id,
+                    "status": status,
+                    "message": message,
+                    "output": self._safe_asr_payload(output),
+                    "payload": self._safe_asr_payload(payload),
+                },
+            )
             raise RuntimeError(f"ASR_TASK_FAILED: task_id={task_id}, status={status}, message={message}")
         if status not in {"PENDING", "RUNNING", ""}:
             raise RuntimeError(f"ASR_TASK_UNKNOWN_STATUS: task_id={task_id}, status={status}, response={self._compact_json(output)}")
@@ -191,6 +202,17 @@ class ASRClient:
                 return result_url
             if status in {"FAILED", "CANCELED", "CANCELLED"}:
                 message = output.get("message") or payload.get("message") or self._compact_json(output)
+                self._emit_asr_event(
+                    on_event,
+                    "task_failed",
+                    {
+                        "task_id": task_id,
+                        "status": status,
+                        "message": message,
+                        "output": self._safe_asr_payload(output),
+                        "payload": self._safe_asr_payload(payload),
+                    },
+                )
                 raise RuntimeError(f"ASR_TASK_FAILED: task_id={task_id}, status={status}, message={message}")
             if status not in {"PENDING", "RUNNING", ""}:
                 raise RuntimeError(f"ASR_TASK_UNKNOWN_STATUS: task_id={task_id}, status={status}, response={self._compact_json(output)}")
@@ -206,6 +228,70 @@ class ASRClient:
             callback(event, payload or {})
         except Exception:
             pass
+
+    def inspect_audio_url(self, audio_url: str, expected_size: int | None = None) -> dict:
+        parsed = urlparse(audio_url)
+        diagnostics: dict[str, Any] = {
+            "url_host": parsed.netloc,
+            "url_scheme": parsed.scheme,
+            "expected_size_bytes": expected_size,
+        }
+        try:
+            response = requests.head(audio_url, allow_redirects=True, timeout=30)
+            diagnostics.update(self._response_diagnostics(response, "head"))
+            content_length = self._content_length(response)
+            if content_length is not None:
+                diagnostics["content_length_matches_expected"] = expected_size is None or content_length == expected_size
+            return diagnostics
+        except Exception as exc:
+            diagnostics["head_error"] = str(exc)[:500]
+
+        try:
+            response = requests.get(audio_url, headers={"Range": "bytes=0-0"}, stream=True, timeout=30)
+            diagnostics.update(self._response_diagnostics(response, "range_get"))
+            content_range = response.headers.get("Content-Range") or response.headers.get("content-range")
+            total = self._total_size_from_content_range(content_range)
+            if total is not None:
+                diagnostics["content_length_bytes"] = total
+                diagnostics["content_length_matches_expected"] = expected_size is None or total == expected_size
+            response.close()
+        except Exception as exc:
+            diagnostics["range_get_error"] = str(exc)[:500]
+        return diagnostics
+
+    def _response_diagnostics(self, response: requests.Response, prefix: str) -> dict:
+        headers = response.headers
+        return {
+            f"{prefix}_status_code": response.status_code,
+            f"{prefix}_final_url_host": urlparse(response.url).netloc,
+            "content_length_bytes": self._content_length(response),
+            "content_type": headers.get("Content-Type") or headers.get("content-type"),
+            "accept_ranges": headers.get("Accept-Ranges") or headers.get("accept-ranges"),
+            "content_range": headers.get("Content-Range") or headers.get("content-range"),
+        }
+
+    def _content_length(self, response: requests.Response) -> int | None:
+        raw = response.headers.get("Content-Length") or response.headers.get("content-length")
+        try:
+            return int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _total_size_from_content_range(self, value: str | None) -> int | None:
+        if not value or "/" not in value:
+            return None
+        raw = value.rsplit("/", 1)[-1]
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _safe_asr_payload(self, payload: Any) -> Any:
+        text = self._compact_json(payload)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
 
     def _extract_transcription_url(self, output: dict) -> str:
         results = output.get("results") or []
