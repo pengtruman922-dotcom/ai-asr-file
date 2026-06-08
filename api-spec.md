@@ -17,7 +17,7 @@
 
 MVP 不做正式用户管理、部门、权限、RAG 和向量数据库。
 
-注意：Railway 部署后应用具备公网访问能力。MVP 先提供最简单登录，账号固定为 `admin`，密码固定为 `mp2026`，后续再升级为正式用户体系。
+注意：Railway 部署后应用具备公网访问能力。MVP 先提供最简单登录，账号固定为 `admin`，密码固定为 `admin456`，后续再升级为正式用户体系。
 
 ---
 
@@ -250,7 +250,7 @@ POST /api/auth/login
 ```json
 {
   "username": "admin",
-  "password": "mp2026"
+  "password": "admin456"
 }
 ```
 
@@ -1539,7 +1539,7 @@ RAILWAY_BUCKET_REGION=auto
 
 # Auth
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=mp2026
+ADMIN_PASSWORD=admin456
 SESSION_SECRET=
 
 # ASR
@@ -2110,7 +2110,7 @@ ASR 诊断事件包括：`download_url_created`、`submit_start`、`submit_compl
 ### Auth / Me
 
 - `POST /api/auth/login`
-  - 请求：`{ "username": "admin", "password": "mp2026" }`
+  - 请求：`{ "username": "admin", "password": "admin456" }`
   - 返回：`{ "token": "...", "user": { "user_id": "...", "username": "admin", "role": "admin" } }`
 - `GET /api/auth/me`
   - 返回当前登录用户。

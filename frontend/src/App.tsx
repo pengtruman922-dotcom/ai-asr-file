@@ -513,9 +513,9 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
             <h2 className="login-form-title">洞见</h2>
             <p className="login-form-subtitle">MP&nbsp;Insight</p>
             <span className="login-form-rule" />
-            <p className="login-form-hint">欢迎回来，请使用管理员分配的用户ID登录。<br />内测期间默认用户ID：<em>admin</em> / <em>mp2026</em></p>
+            <p className="login-form-hint">欢迎回来，请使用管理员分配的用户ID登录。</p>
           </div>
-          <Form className="login-form" layout="vertical" initialValues={{ username: 'admin', password: 'mp2026' }} onFinish={onFinish}>
+          <Form className="login-form" layout="vertical" initialValues={{ username: 'admin', password: 'admin456' }} onFinish={onFinish}>
             <Form.Item name="username" label="用户ID" rules={[{ required: true, message: '请输入用户ID' }]}>
               <Input size="large" variant="borderless" className="login-input" placeholder="请输入用户ID" />
             </Form.Item>

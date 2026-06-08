@@ -32,7 +32,7 @@ npm run dev
 Default login:
 
 ```text
-admin / mp2026
+admin / admin456
 ```
 
 ## Railway Services
@@ -87,7 +87,7 @@ APP_ENV=production
 APP_BASE_URL=https://<your-web-service-domain>
 SESSION_SECRET=<random-secret>
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=mp2026
+ADMIN_PASSWORD=admin456
 DATABASE_URL=<Railway PostgreSQL connection string>
 REDIS_URL=<Railway Redis connection string>
 QUEUE_SYNC=false

@@ -1078,7 +1078,7 @@ MVP 增加最简单登录：
 
 ```text
 账号：admin
-密码：mp2026
+密码：admin456
 ```
 
 说明：
@@ -1303,7 +1303,7 @@ APP_ENV=production
 APP_BASE_URL=https://<Railway Web 域名>
 SESSION_SECRET=<随机字符串>
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=mp2026
+ADMIN_PASSWORD=admin456
 DATABASE_URL=<Railway PostgreSQL URL>
 REDIS_URL=<Railway Redis URL>
 QUEUE_SYNC=false

@@ -117,6 +117,9 @@ def ensure_default_admin() -> None:
     from .utils import new_id
 
     settings = get_settings()
+    legacy_default_password_hashes = {
+        hash_password("mp2026"),
+    }
     session = SessionLocal()
     try:
         admin = session.query(User).filter_by(username=settings.admin_username).first()
@@ -133,6 +136,8 @@ def ensure_default_admin() -> None:
             session.flush()
             session.add(UserQuota(user_id=admin.id))
         elif not admin.password_hash:
+            admin.password_hash = hash_password(settings.admin_password)
+        elif admin.password_hash in legacy_default_password_hashes:
             admin.password_hash = hash_password(settings.admin_password)
         session.query(Project).filter(Project.owner_id.is_(None)).update({"owner_id": admin.id}, synchronize_session=False)
         existing_recording_ids = {

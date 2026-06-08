@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     app_base_url: str = "http://localhost:8000"
     session_secret: str = "change-me"
     admin_username: str = "admin"
-    admin_password: str = "mp2026"
+    admin_password: str = "admin456"
 
     database_url: str = "sqlite:///./data/app.db"
     redis_url: str = "redis://localhost:6379/0"
