@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, Key, PointerEvent as ReactPointerEvent } from 'react';
+import type { CSSProperties, Key, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import { Button, Card, Checkbox, Dropdown, Form, Input, InputNumber, Layout, List, Modal, Progress, Radio, Select, Space, Table, Tabs, Tag, Typography, Upload, message } from 'antd';
 import { CloseOutlined, DeleteOutlined, DownloadOutlined, DownOutlined, EditOutlined, InboxOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
 import type { MenuProps, UploadFile } from 'antd';
 import { api, clearToken, formatDuration, formatMs, getToken, setToken } from './api';
-import type { AiTestResult, AppSettings, Job, MeUsage, Project, QAMessage, QAThread, Recording, StorageTestResult, TranscriptSegment, UploadSettings, User, UserQuota } from './types';
+import type { AiTestResult, AppSettings, DocumentSummary, Job, MeUsage, Project, QAMessage, QAThread, Recording, StorageTestResult, TranscriptSegment, UploadSettings, User, UserQuota } from './types';
 
 const { Header, Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
@@ -179,6 +179,7 @@ const JOB_TYPE_LABELS: Record<string, string> = {
   asr_transcription: 'ASR 转写',
   clean_transcript: '清洁稿生成',
   summary_generation: '纪要生成',
+  document_summary: '文件摘要',
   extract_text: '文字提取',
   qa_answer: '问答生成',
   export: '导出',
@@ -345,6 +346,23 @@ function formatFileSize(bytes?: number) {
   if (!bytes) return '';
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+function parseTimestampToMs(value: string) {
+  const parts = value.split(':').map((part) => Number.parseInt(part, 10));
+  if (parts.some((part) => Number.isNaN(part))) return null;
+  let seconds = 0;
+  if (parts.length === 2) {
+    seconds = parts[0] * 60 + parts[1];
+  } else if (parts.length === 3) {
+    if (parts[2] >= 60 && parts[0] < 60) {
+      return (parts[0] * 60 + parts[1]) * 1000 + parts[2] * 10;
+    }
+    seconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+  } else {
+    return null;
+  }
+  return seconds * 1000;
 }
 
 function recordingTimerStart(recording?: Recording | null) {
@@ -750,6 +768,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const [fileDetail, setFileDetail] = useState<Recording | null>(null);
   const [showRaw, setShowRaw] = useState(false);
   const [summary, setSummary] = useState<any>(null);
+  const [documentSummary, setDocumentSummary] = useState<DocumentSummary | null>(null);
   const [summarySubmitting, setSummarySubmitting] = useState(false);
   const [threads, setThreads] = useState<QAThread[]>([]);
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
@@ -801,6 +820,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   const loadSelected = useCallback(async () => {
     if (!selectedId || !selectedRecording) return;
     setExtractedText('');
+    setDocumentSummary(null);
     setFileDetail(selectedRecording);
     if (isAudioFile(selectedRecording) && selectedRecording.recording_id) {
       const [transcript, sum] = await Promise.all([
@@ -813,10 +833,12 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     }
     setSegments([]);
     setSummary(null);
-    const detail = await api<Recording & { extracted_text: string }>(`/api/files/${selectedRecording.file_id}/extracted-text`);
+    const detail = await api<Recording & { extracted_text: string }>(`/api/files/${selectedRecording.file_id}/extracted-text?project_id=${projectId}`);
     setFileDetail(detail);
     setExtractedText(detail.extracted_text || '');
-  }, [selectedId, selectedRecording?.file_id, selectedRecording?.recording_id, selectedRecording?.status]);
+    const docSummary = await api<DocumentSummary>(`/api/files/${selectedRecording.file_id}/document-summary?project_id=${projectId}`).catch(() => null);
+    setDocumentSummary(docSummary);
+  }, [projectId, selectedId, selectedRecording?.file_id, selectedRecording?.recording_id, selectedRecording?.status]);
 
   const loadThreads = useCallback(async () => {
     const data = await api<{ items: QAThread[] }>(`/api/projects/${projectId}/qa-threads`);
@@ -849,7 +871,11 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   useEffect(() => { void loadThread(); }, [loadThread]);
 
   useEffect(() => {
-    const hasRunningRecording = recordings.some((item) => isRecordingProcessing(item.status));
+    const hasRunningRecording = recordings.some((item) =>
+      isRecordingProcessing(item.status)
+      || ['queued', 'running'].includes(item.summary_status || item.document_summary?.status || '')
+      || (item.current_job_type === 'document_summary' && ['queued', 'running'].includes(item.current_job_status || ''))
+    );
     const hasRunningMessage = !qaStreaming && messages.some((item) => ['queued', 'running'].includes(item.status));
     if (!hasRunningRecording && !hasRunningMessage) return;
     const timer = window.setInterval(() => {
@@ -861,7 +887,11 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   }, [recordings, messages, qaStreaming, loadProject, loadSelected, loadThread]);
 
   useEffect(() => {
-    const hasRunningRecording = recordings.some((item) => isRecordingProcessing(item.status));
+    const hasRunningRecording = recordings.some((item) =>
+      isRecordingProcessing(item.status)
+      || ['queued', 'running'].includes(item.summary_status || item.document_summary?.status || '')
+      || (item.current_job_type === 'document_summary' && ['queued', 'running'].includes(item.current_job_status || ''))
+    );
     const hasRunningMessage = messages.some((item) => ['queued', 'running'].includes(item.status));
     if (!hasRunningRecording && !hasRunningMessage) return;
     setClockNow(Date.now());
@@ -948,9 +978,14 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
 
   const jumpTo = async (ms: number) => {
     if (!audioRef.current || !selectedRecording?.recording_id || !isAudioFile(selectedRecording)) return;
+    if (selectedRecording.duration_seconds && ms / 1000 > selectedRecording.duration_seconds + 1) {
+      message.warning('时间点超出录音时长');
+      return;
+    }
     if (!audioRef.current.src) {
       const data = await api<{ url: string }>(`/api/recordings/${selectedRecording.recording_id}/play-url`, { method: 'POST' });
       audioRef.current.src = data.url;
+      audioRef.current.load();
     }
     audioRef.current.currentTime = ms / 1000;
     void audioRef.current.play();
@@ -1130,6 +1165,22 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
   };
 
   const deleteRecording = async (id: string) => {
+    const target = recordings.find((item) => fileKey(item) === id);
+    if (target?.source === 'reference' && target.reference_id) {
+      Modal.confirm({
+        title: '移除引用文件？',
+        content: '只会从当前项目移除该引用，不会删除原始文件，也不会影响其他项目。',
+        okText: '移除引用',
+        okButtonProps: { danger: true },
+        onOk: async () => {
+          await api(`/api/projects/${projectId}/file-references/${target.reference_id}`, { method: 'DELETE' });
+          message.success('已移除引用文件');
+          setSelectedId(null);
+          void loadProject();
+        },
+      });
+      return;
+    }
     Modal.confirm({ title: '确认硬删除文件？', content: '将同时删除原始文件、处理结果和相关任务。若被其他项目引用，需在提示后再次确认。', okText: '确认删除', okButtonProps: { danger: true }, onOk: async () => { const deleted = await deleteFileWithConfirm(id); if (deleted) { message.success('已删除'); setSelectedId(null); void loadProject(); } } });
   };
 
@@ -1137,6 +1188,7 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
     const nextName = fileName.trim();
     if (!nextName) return message.warning('文件名称不能为空');
     const file = recordings.find((item) => fileKey(item) === id);
+    if (file?.source === 'reference') return message.warning('引用文件不能在当前项目重命名');
     if (file?.recording_id && isAudioFile(file)) {
       await api(`/api/recordings/${file.recording_id}`, { method: 'PATCH', body: JSON.stringify({ file_name: nextName }) });
     } else {
@@ -1324,8 +1376,12 @@ function ProjectPage({ projectId, onBack }: { projectId: string; onBack: () => v
         </main>
         <ColumnResizeHandle side="right" active={activeResize === 'right'} onPointerDown={(event) => startColumnResize('right', event)} onDoubleClick={resetColumnWidths} />
         <aside className="right-panel panel-scroll">
-          <Tabs defaultActiveKey="summary" items={[
-            { key: 'summary', label: isAudioFile(selectedRecording) ? '纪要' : '文件信息', children: isAudioFile(selectedRecording) ? <SummaryView summary={summary} stale={selectedRecording?.summary_stale || summary?.stale} regenerating={summaryJobInProgress || summarySubmitting} onExport={() => exportMd('summary')} onRegenerate={regenerateSummary} /> : <FileInfoView file={fileDetail || selectedRecording} /> },
+          <Tabs key={isAudioFile(selectedRecording) ? 'audio-tabs' : 'document-tabs'} defaultActiveKey="summary" items={isAudioFile(selectedRecording) ? [
+            { key: 'summary', label: '纪要', children: <SummaryView summary={summary} stale={selectedRecording?.summary_stale || summary?.stale} regenerating={summaryJobInProgress || summarySubmitting} onExport={() => exportMd('summary')} onRegenerate={regenerateSummary} onJump={jumpTo} /> },
+            { key: 'qa', label: '问答', children: <QAView checked={checkedIds} selectionMode={qaSelectionMode} recordings={recordings} threads={threads} currentThreadId={currentThreadId} setCurrentThreadId={setCurrentThreadId} messages={messages} question={qaQuestion} setQuestion={setQaQuestion} onAsk={ask} onNewThread={createThread} onDeleteThread={deleteThread} submitting={qaSubmitting} waitingForAnswer={pendingQaAnswer} /> }
+          ] : [
+            { key: 'summary', label: '摘要', children: <DocumentSummaryView summary={documentSummary || (fileDetail || selectedRecording)?.document_summary} file={fileDetail || selectedRecording} /> },
+            { key: 'info', label: '文件信息', children: <FileInfoView file={fileDetail || selectedRecording} /> },
             { key: 'qa', label: '问答', children: <QAView checked={checkedIds} selectionMode={qaSelectionMode} recordings={recordings} threads={threads} currentThreadId={currentThreadId} setCurrentThreadId={setCurrentThreadId} messages={messages} question={qaQuestion} setQuestion={setQaQuestion} onAsk={ask} onNewThread={createThread} onDeleteThread={deleteThread} submitting={qaSubmitting} waitingForAnswer={pendingQaAnswer} /> }
           ]} />
         </aside>
@@ -1366,10 +1422,11 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
     isAudioFile(recording) && recording.duration_seconds ? `音频时长 ${formatDuration(recording.duration_seconds)}` : '',
     !isAudioFile(recording) && recording.extracted_char_count ? `提取 ${recording.extracted_char_count} 字` : '',
     formatFileSize(recording.file_size_bytes),
-    recording.source === 'reference' ? '引用文件' : '',
   ].filter(Boolean).join(' · ');
   const unavailable = ['source_unshared', 'source_deleted', 'file_deleted'].includes(recording.reference_status || '');
   const canCancelCurrentJob = recording.current_job_status === 'queued' && Boolean(recording.current_job_id);
+  const isReference = recording.source === 'reference';
+  const docSummaryStatus = recording.summary_status || recording.document_summary?.status || '';
   const save = () => {
     if (skipBlurSaveRef.current) {
       skipBlurSaveRef.current = false;
@@ -1397,7 +1454,7 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
       <Checkbox checked={checked} disabled={checkDisabled} onClick={(e) => e.stopPropagation()} onChange={(e) => onCheck(e.target.checked)} />
       <div className="recording-main">
         <div className="recording-name" onClick={(e) => e.stopPropagation()}>
-          {editing ? <Input size="small" value={name} autoFocus onFocus={(e) => e.target.select()} onBlur={save} onChange={(e) => setName(e.target.value)} onPressEnter={save} onKeyDown={(e) => { if (e.key === 'Escape') cancelEdit(); }} /> : <><Text strong className="recording-filename">{recording.file_name}</Text><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(true)} /></>}
+          {editing ? <Input size="small" value={name} autoFocus onFocus={(e) => e.target.select()} onBlur={save} onChange={(e) => setName(e.target.value)} onPressEnter={save} onKeyDown={(e) => { if (e.key === 'Escape') cancelEdit(); }} /> : <><Text strong className="recording-filename">{recording.file_name}</Text>{isReference && <Tag color="blue">引用</Tag>}{!isReference && <Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(true)} />}</>}
         </div>
         <Space wrap className="recording-status-line">
           <span className={`status-dot-label status-${recordingStatusClass(recording.status)}`}>
@@ -1407,13 +1464,16 @@ function RecordingListItem({ recording, active, checked, checkDisabled, clockNow
           {isRecordingProcessing(recording.status) && <Text type="secondary">已处理 {elapsedSince(recordingTimerStart(recording), clockNow)}</Text>}
           {recording.status === 'failed' && failedStage && <Tag color="red">失败阶段：{failedStage}</Tag>}
         </Space>
+        {isReference && recording.source_project_title && <Tag color="geekblue">来源：{recording.source_project_title}</Tag>}
         {unavailable && <Tag color="red">来源已不可用</Tag>}
         {recording.status === 'failed' && recording.latest_failed_job_error_message && <Text type="secondary" className="recording-error" title={recording.latest_failed_job_error_message}>{recording.latest_failed_job_error_message}</Text>}
         <Text type="secondary" className="recording-meta">{mediaMeta}</Text>
+        {!isAudioFile(recording) && ['queued', 'running'].includes(docSummaryStatus) && <Tag color="blue">{docSummaryStatus === 'queued' ? '摘要排队中' : '摘要生成中'}</Tag>}
+        {!isAudioFile(recording) && docSummaryStatus === 'failed' && <Tag color="red">摘要失败</Tag>}
         {recording.status === 'failed' && <Button size="small" type="link" className="recording-retry" onClick={(e) => { e.stopPropagation(); void onRetry(recording.latest_failed_job_id); }}>重试{failedStage ? ` ${failedStage}` : ''}</Button>}
         {canCancelCurrentJob && <Button size="small" danger type="link" className="recording-retry" onClick={(e) => { e.stopPropagation(); void onCancelJob(recording.current_job_id); }}>取消排队任务</Button>}
       </div>
-      <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={(e) => { e.stopPropagation(); void onDelete(); }} />
+      <Button size="small" danger type="text" title={isReference ? '移除引用' : '删除文件'} icon={<DeleteOutlined />} onClick={(e) => { e.stopPropagation(); void onDelete(); }} />
     </div>
   </List.Item>;
 }
@@ -1457,12 +1517,12 @@ function SegmentEditor({ segment, showRaw, onJump, onSave }: { segment: Transcri
   </Card>;
 }
 
-function SummaryView({ summary, stale, regenerating, onExport, onRegenerate }: { summary: any; stale?: boolean; regenerating?: boolean; onExport: () => void; onRegenerate: () => void }) {
+function SummaryView({ summary, stale, regenerating, onExport, onRegenerate, onJump }: { summary: any; stale?: boolean; regenerating?: boolean; onExport: () => void; onRegenerate: () => void; onJump: (ms: number) => void }) {
   const markdown = summary?.content?.markdown || '';
   return <Space direction="vertical" style={{ width: '100%' }}>
     {stale && <Space><Tag color="orange">清洁稿已编辑，纪要可能过期</Tag><Button size="small" icon={<ReloadOutlined />} loading={regenerating} disabled={regenerating} onClick={onRegenerate}>{regenerating ? '纪要生成中' : '重新生成纪要'}</Button></Space>}
     <Button icon={<DownloadOutlined />} onClick={onExport}>导出纪要 Markdown</Button>
-    <MarkdownLite markdown={markdown || '暂无纪要'} />
+    <MarkdownLite markdown={markdown || '暂无纪要'} onJump={onJump} />
   </Space>;
 }
 
@@ -1475,11 +1535,35 @@ function ExtractedTextView({ text, file }: { text: string; file: Recording | nul
   </div>;
 }
 
+function DocumentSummaryView({ summary, file }: { summary?: DocumentSummary | null; file: Recording | null }) {
+  if (!file) return <Text type="secondary">请选择文件</Text>;
+  const status = summary?.status || file.document_summary?.status || '';
+  const markdown = summary?.content?.markdown || summary?.markdown || file.document_summary?.content?.markdown || file.document_summary?.markdown || '';
+  const error = summary?.error_message || file.document_summary?.error_message || '';
+  if (['queued', 'running'].includes(status)) {
+    return <Space direction="vertical" style={{ width: '100%' }}>
+      <Tag color="blue">{status === 'queued' ? '摘要排队中' : '摘要生成中'}</Tag>
+      <Text type="secondary">资料文件提取完成后会自动生成摘要，请稍后刷新查看。</Text>
+    </Space>;
+  }
+  if (status === 'failed') {
+    return <Space direction="vertical" style={{ width: '100%' }}>
+      <Tag color="red">摘要生成失败</Tag>
+      <Text type="secondary">{error || '请稍后重试或检查纪要模型配置。'}</Text>
+    </Space>;
+  }
+  if (markdown) return <MarkdownLite markdown={markdown} />;
+  if (isRecordingProcessing(file.status)) return <Text type="secondary">正在提取文字，完成后会自动生成摘要。</Text>;
+  return <Text type="secondary">暂无摘要，文件提取完成后会自动生成。</Text>;
+}
+
 function FileInfoView({ file }: { file: Recording | null }) {
   if (!file) return <Text type="secondary">请选择文件</Text>;
   return <Space direction="vertical" style={{ width: '100%' }}>
     <Tag color="blue">{fileTypeLabel(file.file_type)}</Tag>
+    {file.source === 'reference' && <Tag color="geekblue">引用文件</Tag>}
     <Paragraph><Text strong>文件名：</Text>{file.file_name}</Paragraph>
+    {file.source === 'reference' && <Paragraph><Text strong>来源项目：</Text>{file.source_project_title || file.source_project_id || '-'}</Paragraph>}
     <Paragraph><Text strong>处理状态：</Text>{recordingStatusLabel(file.status)}</Paragraph>
     <Paragraph><Text strong>提取引擎：</Text>{file.extraction_engine || '-'}</Paragraph>
     <Paragraph><Text strong>提取字数：</Text>{file.extracted_char_count || 0}</Paragraph>
@@ -1487,15 +1571,40 @@ function FileInfoView({ file }: { file: Recording | null }) {
   </Space>;
 }
 
-function MarkdownLite({ markdown }: { markdown: string }) {
+function MarkdownLite({ markdown, onJump }: { markdown: string; onJump?: (ms: number) => void }) {
+  const renderInline = (text: string, keyPrefix: string) => {
+    if (!onJump) return text;
+    const parts: ReactNode[] = [];
+    const pattern = /(?:\[(\d{1,2}:\d{2}(?::\d{2})?)\](?:\([^)]*\))?)|(\d{1,2}:\d{2}(?::\d{2})?)/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      const full = match[0];
+      const timeText = match[1] || match[2];
+      if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index));
+      const ms = parseTimestampToMs(timeText);
+      if (ms === null) {
+        parts.push(full);
+      } else {
+        parts.push(
+          <Button key={`${keyPrefix}-${match.index}`} type="link" size="small" className="summary-time-link" onClick={() => onJump(ms)}>
+            {timeText}
+          </Button>
+        );
+      }
+      lastIndex = match.index + full.length;
+    }
+    if (lastIndex < text.length) parts.push(text.slice(lastIndex));
+    return parts.length ? parts : text;
+  };
   return <div className="markdown-body">{markdown.split('\n').map((line, index) => {
     if (line.startsWith('### ')) return <Title level={5} key={index}>{line.slice(4)}</Title>;
     if (line.startsWith('## ')) return <Title level={4} key={index}>{line.slice(3)}</Title>;
     if (line.startsWith('# ')) return <Title level={3} key={index}>{line.slice(2)}</Title>;
-    if (line.startsWith('- ')) return <Paragraph key={index}>• {line.slice(2)}</Paragraph>;
-    if (/^\d+\.\s/.test(line)) return <Paragraph key={index}>{line}</Paragraph>;
+    if (line.startsWith('- ')) return <Paragraph key={index}>• {renderInline(line.slice(2), `line-${index}`)}</Paragraph>;
+    if (/^\d+\.\s/.test(line)) return <Paragraph key={index}>{renderInline(line, `line-${index}`)}</Paragraph>;
     if (!line.trim()) return <div key={index} className="md-gap" />;
-    return <Paragraph key={index}>{line}</Paragraph>;
+    return <Paragraph key={index}>{renderInline(line, `line-${index}`)}</Paragraph>;
   })}</div>;
 }
 
@@ -1605,7 +1714,7 @@ function QAView({ checked, selectionMode, recordings, threads, currentThreadId, 
       </Card>)}
     </div>
     {waitingForAnswer && <Paragraph type="secondary">AI 正在回答，完成后可发送下一条问题；你可以先继续输入。</Paragraph>}
-    <Input.TextArea rows={3} placeholder="输入问题" value={question} onChange={(e) => setQuestion(e.target.value)} onPressEnter={(e) => { if (!e.shiftKey) { e.preventDefault(); if (!waitingForAnswer) onAsk(); } }} />
+    <Input.TextArea rows={3} placeholder="" value={question} onChange={(e) => setQuestion(e.target.value)} onPressEnter={(e) => { if (!e.shiftKey) { e.preventDefault(); if (!waitingForAnswer) onAsk(); } }} />
     <Button type="primary" onClick={onAsk} loading={submitting} disabled={waitingForAnswer || !checked.length}>发送</Button>
   </Space>;
 }

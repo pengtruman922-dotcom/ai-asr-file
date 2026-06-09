@@ -745,7 +745,44 @@ class LLMClient:
             config.get("url", self.settings.llm_summary_base_url),
             api_key,
             config.get("model", self.settings.llm_summary_model),
-            "你是咨询公司访谈纪要助手。请基于清洁稿生成可直接阅读和引用的 Markdown 纪要，包含访谈摘要、关键结论、客户痛点、需求分析、风险与顾虑、后续建议、报告引用建议。报告引用建议必须带时间戳。不要输出 JSON。",
+            "你是咨询公司访谈纪要助手。请基于清洁稿生成可直接阅读和引用的 Markdown 纪要，包含访谈摘要、关键结论、客户痛点、需求分析、风险与顾虑、后续建议、报告引用建议。报告引用建议必须带时间戳，时间戳统一使用 [mm:ss] 或 [hh:mm:ss]，不要生成无效锚点链接。不要输出 JSON。",
+            prompt,
+        )
+        return {"format": "markdown", "markdown": content.strip()}
+
+    def summarize_document(self, file_name: str, file_type: str, extracted_text: str) -> dict:
+        config = get_ai_config("summary")
+        api_key = config.get("api_key", "")
+        text = (extracted_text or "").strip()
+        if self._use_local_mock(self.settings.llm_mock_enabled, api_key):
+            preview = text[:500] or "文件暂无可摘要文本。"
+            markdown = f"""## 文件摘要
+{file_name} 已完成文本提取，可用于项目问答。
+
+## 关键内容
+- 文件类型：{file_type or "document"}
+- 提取字数：{len(text)}
+- 内容预览：{preview}
+"""
+            return {"format": "markdown", "markdown": markdown.strip()}
+        if not api_key:
+            raise RuntimeError("LLM_API_KEY_MISSING: 请先在系统设置中配置纪要模型 API Key。")
+
+        max_chars = 60000
+        prompt = json.dumps(
+            {
+                "file_name": file_name,
+                "file_type": file_type,
+                "extracted_text": text[:max_chars],
+                "truncated": len(text) > max_chars,
+            },
+            ensure_ascii=False,
+        )
+        content = self._chat_plain(
+            config.get("url", self.settings.llm_summary_base_url),
+            api_key,
+            config.get("model", self.settings.llm_summary_model),
+            "你是企业项目材料摘要助手。请基于文件提取文本生成简洁 Markdown 摘要，包含：文件概要、关键要点、重要数据或结论、待办/风险（如无则省略）。不要编造文件中没有的信息，不要输出 JSON。",
             prompt,
         )
         return {"format": "markdown", "markdown": content.strip()}

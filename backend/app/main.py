@@ -396,14 +396,19 @@ def file_payload(project_file: ProjectFile, db: Session | None = None, reference
             .order_by(ProcessingJob.finished_at.desc().nullslast(), ProcessingJob.updated_at.desc())
             .first()
         )
+    metadata = dict(project_file.metadata_json or {})
+    document_summary = metadata.get("document_summary") if isinstance(metadata.get("document_summary"), dict) else {}
+    source_project = db.get(Project, project_file.project_id) if db else None
     payload = {
         "file_id": project_file.id,
         "recording_id": project_file.recording_id or project_file.id,
         "project_id": reference.target_project_id if reference else project_file.project_id,
         "source_project_id": project_file.project_id,
+        "source_project_title": source_project.title if source_project else "",
         "reference_id": reference.id if reference else None,
         "reference_status": reference.status if reference else "",
         "source": "reference" if reference else "own",
+        "is_reference": bool(reference),
         "file_name": project_file.file_name,
         "file_type": project_file.file_type,
         "object_key": project_file.object_key,
@@ -416,6 +421,8 @@ def file_payload(project_file: ProjectFile, db: Session | None = None, reference
         "extracted_char_count": project_file.extracted_char_count,
         "extraction_engine": project_file.extraction_engine,
         "extraction_warnings": project_file.extraction_warnings or [],
+        "document_summary": document_summary,
+        "summary_status": document_summary.get("status", ""),
         "created_at": serialize_dt(project_file.created_at),
         "updated_at": serialize_dt(project_file.updated_at),
     }
@@ -1039,30 +1046,101 @@ def list_project_files(project_id: str, request: Request, keyword: str = "", pag
     return ok({"items": items[offset: offset + page_size], "page": page, "page_size": page_size, "total": total})
 
 
+def accessible_file_reference(db: Session, project_file: ProjectFile, user: User, project_id: str = "") -> ProjectFileReference | None:
+    if project_id and project_id != project_file.project_id:
+        reference = db.query(ProjectFileReference).filter_by(target_project_id=project_id, source_file_id=project_file.id, status="active").first()
+        if not reference:
+            raise HTTPException(status_code=403, detail="PROJECT_FORBIDDEN")
+        ensure_project_access(project_id, user, db)
+        return reference
+    ensure_project_access(project_file.project_id, user, db)
+    return None
+
+
 @app.get("/api/files/{file_id}")
-def get_file(file_id: str, request: Request, db: Session = Depends(get_db)):
+def get_file(file_id: str, request: Request, project_id: str = "", db: Session = Depends(get_db)):
     user = current_user(request, db)
     project_file = db.get(ProjectFile, file_id)
     if not project_file:
         return fail("FILE_NOT_FOUND", "文件不存在", status_code=404)
     try:
-        ensure_project_access(project_file.project_id, user, db)
+        reference = accessible_file_reference(db, project_file, user, project_id)
     except HTTPException as exc:
         return fail(str(exc.detail), "文件不存在或无权访问", status_code=exc.status_code)
-    return ok(file_payload(project_file, db))
+    return ok(file_payload(project_file, db, reference))
 
 
 @app.get("/api/files/{file_id}/extracted-text")
-def get_file_extracted_text(file_id: str, request: Request, db: Session = Depends(get_db)):
+def get_file_extracted_text(file_id: str, request: Request, project_id: str = "", db: Session = Depends(get_db)):
     user = current_user(request, db)
     project_file = db.get(ProjectFile, file_id)
     if not project_file:
         return fail("FILE_NOT_FOUND", "文件不存在", status_code=404)
     try:
-        ensure_project_access(project_file.project_id, user, db)
+        reference = accessible_file_reference(db, project_file, user, project_id)
     except HTTPException as exc:
         return fail(str(exc.detail), "文件不存在或无权访问", status_code=exc.status_code)
-    return ok(file_payload(project_file, db) | {"extracted_text": project_file.extracted_text or ""})
+    return ok(file_payload(project_file, db, reference) | {"extracted_text": project_file.extracted_text or ""})
+
+
+@app.get("/api/files/{file_id}/document-summary")
+def get_file_document_summary(file_id: str, request: Request, project_id: str = "", db: Session = Depends(get_db)):
+    user = current_user(request, db)
+    project_file = db.get(ProjectFile, file_id)
+    if not project_file:
+        return fail("FILE_NOT_FOUND", "文件不存在", status_code=404)
+    try:
+        accessible_file_reference(db, project_file, user, project_id)
+    except HTTPException as exc:
+        return fail(str(exc.detail), "文件不存在或无权访问", status_code=exc.status_code)
+    metadata = dict(project_file.metadata_json or {})
+    document_summary = metadata.get("document_summary") if isinstance(metadata.get("document_summary"), dict) else {}
+    created_job_id = ""
+    if project_file.file_type != "audio" and (project_file.extracted_text or "").strip() and not document_summary.get("status"):
+        active_job = (
+            db.query(ProcessingJob)
+            .filter(
+                ProcessingJob.file_id == project_file.id,
+                ProcessingJob.job_type == "document_summary",
+                ProcessingJob.status.in_(["queued", "running"]),
+            )
+            .order_by(ProcessingJob.created_at.desc())
+            .first()
+        )
+        if active_job:
+            document_summary = {
+                "status": active_job.status,
+                "content": {},
+                "markdown": "",
+                "source_char_count": project_file.extracted_char_count or len(project_file.extracted_text or ""),
+                "error_message": "",
+            }
+        else:
+            document_summary = {
+                "status": "queued",
+                "content": {},
+                "markdown": "",
+                "source_char_count": project_file.extracted_char_count or len(project_file.extracted_text or ""),
+                "error_message": "",
+            }
+            job = create_job(db, project_file.project_id, None, "document_summary", {"file_id": project_file.id, "user_id": user.id})
+            created_job_id = job.id
+        metadata["document_summary"] = document_summary
+        project_file.metadata_json = metadata
+        db.commit()
+        if created_job_id:
+            enqueue_job(created_job_id)
+    return ok(
+        {
+            "file_id": project_file.id,
+            "status": document_summary.get("status", ""),
+            "content": document_summary.get("content") or {"format": "markdown", "markdown": document_summary.get("markdown", "")},
+            "markdown": document_summary.get("markdown", ""),
+            "source_char_count": document_summary.get("source_char_count", project_file.extracted_char_count or 0),
+            "generated_at": document_summary.get("generated_at", ""),
+            "error_message": document_summary.get("error_message", ""),
+        }
+    )
 
 
 @app.patch("/api/files/{file_id}")

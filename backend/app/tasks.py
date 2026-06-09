@@ -29,6 +29,7 @@ JOB_QUEUE_MAP = {
     "asr_transcription": "asr",
     "clean_transcript": "llm",
     "summary_generation": "llm",
+    "document_summary": "llm",
     "qa_answer": "llm",
     "extract_text": "extract",
     "export": "default",
@@ -117,6 +118,20 @@ def run_job(job_id: str) -> None:
             recording.status = "summary_generating"
             if project_file:
                 project_file.status = "summary_generating"
+        elif job.job_type == "document_summary" and job.file_id:
+            project_file = session.get(ProjectFile, job.file_id)
+            if project_file:
+                metadata = dict(project_file.metadata_json or {})
+                document_summary = dict(metadata.get("document_summary") or {})
+                document_summary.update(
+                    {
+                        "status": "running",
+                        "error_message": "",
+                        "started_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                metadata["document_summary"] = document_summary
+                project_file.metadata_json = metadata
         elif job.job_type == "extract_text" and job.file_id:
             project_file = session.get(ProjectFile, job.file_id)
             if project_file:
@@ -136,6 +151,8 @@ def run_job(job_id: str) -> None:
             _run_clean(job_id)
         elif job_type == "summary_generation":
             _run_summary(job_id)
+        elif job_type == "document_summary":
+            _run_document_summary(job_id)
         elif job_type == "qa_answer":
             _run_qa(job_id)
         elif job_type == "extract_text":
@@ -163,8 +180,21 @@ def run_job(job_id: str) -> None:
                 if job.file_id:
                     project_file = session.get(ProjectFile, job.file_id)
                     if project_file:
-                        project_file.status = "failed"
-                        project_file.extraction_status = "failed" if job_type == "extract_text" else project_file.extraction_status
+                        if job_type == "document_summary":
+                            metadata = dict(project_file.metadata_json or {})
+                            document_summary = dict(metadata.get("document_summary") or {})
+                            document_summary.update(
+                                {
+                                    "status": "failed",
+                                    "error_message": message,
+                                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                                }
+                            )
+                            metadata["document_summary"] = document_summary
+                            project_file.metadata_json = metadata
+                        else:
+                            project_file.status = "failed"
+                            project_file.extraction_status = "failed" if job_type == "extract_text" else project_file.extraction_status
             message_id = (job.metadata_json or {}).get("assistant_message_id") if job else None
             if message_id:
                 message = session.get(QAMessage, message_id)
@@ -208,6 +238,12 @@ def retry_failed_job(job_id: str) -> str:
                 if old.job_type == "extract_text":
                     project_file.status = "queued"
                     project_file.extraction_status = "queued"
+                elif old.job_type == "document_summary":
+                    metadata = dict(project_file.metadata_json or {})
+                    document_summary = dict(metadata.get("document_summary") or {})
+                    document_summary.update({"status": "queued", "error_message": ""})
+                    metadata["document_summary"] = document_summary
+                    project_file.metadata_json = metadata
                 elif old.job_type == "asr_transcription":
                     project_file.status = "queued"
                 elif old.job_type == "clean_transcript":
@@ -245,6 +281,18 @@ def cancel_queued_job(job_id: str) -> None:
         elif job.job_type == "extract_text" and project_file:
             project_file.status = "canceled"
             project_file.extraction_status = "canceled"
+        elif job.job_type == "document_summary" and project_file:
+            metadata = dict(project_file.metadata_json or {})
+            document_summary = dict(metadata.get("document_summary") or {})
+            document_summary.update(
+                {
+                    "status": "canceled",
+                    "error_message": "用户取消排队任务",
+                    "finished_at": job.finished_at.isoformat(),
+                }
+            )
+            metadata["document_summary"] = document_summary
+            project_file.metadata_json = metadata
 
         message_id = metadata.get("assistant_message_id")
         if message_id:
@@ -865,6 +913,74 @@ def _run_summary(job_id: str) -> None:
         )
 
 
+def _run_document_summary(job_id: str) -> None:
+    text = ""
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        project_file = session.get(ProjectFile, job.file_id)
+        if not project_file:
+            raise RuntimeError("FILE_NOT_FOUND: 文件不存在")
+        if project_file.file_type == "audio":
+            raise RuntimeError("DOCUMENT_SUMMARY_UNSUPPORTED: 录音文件请使用纪要")
+        text = project_file.extracted_text or ""
+        project_id = project_file.project_id
+        user_id = project_file.created_by_id or job.user_id
+        file_name = project_file.file_name
+        file_type = project_file.file_type
+        metadata = dict(project_file.metadata_json or {})
+        document_summary = dict(metadata.get("document_summary") or {})
+        document_summary.update(
+            {
+                "status": "running",
+                "error_message": "",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        metadata["document_summary"] = document_summary
+        project_file.metadata_json = metadata
+        job.progress = 20
+    if not text.strip():
+        raise RuntimeError("DOCUMENT_TEXT_EMPTY: 文件暂无可摘要文本")
+    content = llm_client.summarize_document(file_name, file_type, text)
+    with session_scope() as session:
+        job = session.get(ProcessingJob, job_id)
+        project_file = session.get(ProjectFile, job.file_id)
+        metadata = dict(project_file.metadata_json or {})
+        document_summary = dict(metadata.get("document_summary") or {})
+        document_summary.update(
+            {
+                "status": "ready",
+                "content": content,
+                "markdown": content.get("markdown", ""),
+                "model": get_ai_config("summary").get("model", get_settings().llm_summary_model),
+                "source_char_count": len(text),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "error_message": "",
+            }
+        )
+        metadata["document_summary"] = document_summary
+        project_file.metadata_json = metadata
+        job.status = "succeeded"
+        job.progress = 100
+        job.finished_at = datetime.now(timezone.utc)
+        session.add(
+            UsageRecord(
+                id=new_id("use"),
+                project_id=project_id,
+                file_id=project_file.id,
+                user_id=user_id,
+                job_id=job.id,
+                call_type="document_summary",
+                model_provider="aliyun/mock",
+                model_name=get_ai_config("summary").get("model", get_settings().llm_summary_model),
+                input_tokens=len(text),
+                output_tokens=len(str(content)),
+                status="succeeded",
+            )
+        )
+
+
 def _run_extract_text(job_id: str) -> None:
     with session_scope() as session:
         job = session.get(ProcessingJob, job_id)
@@ -912,6 +1028,28 @@ def _run_extract_text(job_id: str) -> None:
                 status="succeeded",
             )
         )
+        if extracted_text.strip():
+            metadata = dict(project_file.metadata_json or {})
+            metadata["document_summary"] = {
+                "status": "queued",
+                "content": {},
+                "markdown": "",
+                "source_char_count": len(extracted_text),
+                "error_message": "",
+            }
+            project_file.metadata_json = metadata
+            next_job = create_job(
+                session,
+                project_id,
+                None,
+                "document_summary",
+                {"file_id": project_file.id, "user_id": created_by_id},
+            )
+            next_id = next_job.id
+        else:
+            next_id = ""
+    if next_id:
+        enqueue_job(next_id)
 
 
 def _run_qa(job_id: str) -> None:
@@ -996,6 +1134,7 @@ def _error_code_for(job_type: str) -> str:
         "asr_transcription": "ASR_TASK_FAILED",
         "clean_transcript": "LLM_CLEAN_FAILED",
         "summary_generation": "LLM_SUMMARY_FAILED",
+        "document_summary": "LLM_DOCUMENT_SUMMARY_FAILED",
         "qa_answer": "LLM_CALL_FAILED",
         "extract_text": "TEXT_EXTRACTION_FAILED",
         "export": "EXPORT_FAILED",

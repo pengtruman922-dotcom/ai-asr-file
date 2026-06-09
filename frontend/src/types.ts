@@ -17,9 +17,11 @@ export type Recording = {
   recording_id: string;
   project_id: string;
   source_project_id?: string;
+  source_project_title?: string;
   reference_id?: string | null;
   reference_status?: string;
   source?: 'own' | 'reference';
+  is_reference?: boolean;
   file_name: string;
   file_type?: 'audio' | 'pdf' | 'excel' | 'docx' | 'text' | 'markdown';
   status: string;
@@ -27,6 +29,8 @@ export type Recording = {
   extracted_char_count?: number;
   extraction_engine?: string;
   extraction_warnings?: string[];
+  document_summary?: DocumentSummary;
+  summary_status?: string;
   duration_seconds: number;
   file_size_bytes: number;
   template_type: string;
@@ -43,6 +47,16 @@ export type Recording = {
   latest_failed_job_error_code?: string;
   latest_failed_job_error_message?: string;
   latest_failed_job_finished_at?: string;
+};
+
+export type DocumentSummary = {
+  file_id?: string;
+  status?: string;
+  content?: { format?: string; markdown?: string };
+  markdown?: string;
+  source_char_count?: number;
+  generated_at?: string;
+  error_message?: string;
 };
 
 export type TranscriptSegment = {
